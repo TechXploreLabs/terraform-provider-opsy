@@ -12,7 +12,7 @@ terraform {
 }
 ```
 
-## Resource Condition
+## Resource Conditions
 
 Simplify time based resource condition that run as part of your Terraform workflow:
 
