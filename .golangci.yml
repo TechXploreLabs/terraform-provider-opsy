@@ -25,3 +25,6 @@ linters:
     - unparam
     - unused
     - govet
+
+run:
+  timeout: 5m
