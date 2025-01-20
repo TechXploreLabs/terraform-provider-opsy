@@ -7,7 +7,7 @@ linters:
   enable:
     - durationcheck
     - errcheck
-    - exportloopvar
+    - exportloopref
     - forcetypeassert
     - godot
     - gofmt
