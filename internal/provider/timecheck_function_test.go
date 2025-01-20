@@ -22,7 +22,7 @@ func TestTimeCheckFunction(t *testing.T) {
 			{
 				Config: `
 output "test1" {
- value = provider::opsy::timecheck(["ALL"],["ALL"],"America/New_York","00:00","23:59")
+ value = provider::opsy::timecheck(["ALL"],["ALL"],"Asia/Kolkata","00:00","23:59")
 }
 				`,
 				Check: resource.ComposeAggregateTestCheckFunc(
