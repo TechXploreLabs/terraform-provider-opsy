@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/hashicorp/terraform-plugin-framework/function"
 	"github.com/hashicorp/terraform-plugin-framework/types"
