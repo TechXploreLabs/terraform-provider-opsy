@@ -3,7 +3,7 @@ module github.com/TechXploreLabs/terraform-provider-opsy
 go 1.24.0
 
 require (
-	github.com/hashicorp/go-version v1.7.0
+	github.com/hashicorp/go-version v1.8.0
 	github.com/hashicorp/terraform-plugin-framework v1.13.0
 	github.com/hashicorp/terraform-plugin-go v0.29.0
 	github.com/hashicorp/terraform-plugin-testing v1.12.0
