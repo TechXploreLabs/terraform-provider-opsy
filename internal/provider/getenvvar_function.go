@@ -26,7 +26,7 @@ func (r GetEnvVarFunction) Metadata(_ context.Context, req function.MetadataRequ
 
 func (r GetEnvVarFunction) Definition(_ context.Context, _ function.DefinitionRequest, resp *function.DefinitionResponse) {
 	resp.Definition = function.Definition{
-		Summary: "Checks whether current date and time matches the slot",
+		Summary: "Get the environment variable value",
 		Parameters: []function.Parameter{
 			function.StringParameter{
 				AllowNullValue:     false,
