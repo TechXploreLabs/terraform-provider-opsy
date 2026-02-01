@@ -56,6 +56,7 @@ func (p *OpsyProvider) Functions(ctx context.Context) []func() function.Function
 	return []func() function.Function{
 		NewTimeCheckFunction,
 		NewGetEnvVarFunction,
+		NewOCIFunction,
 	}
 }
 
