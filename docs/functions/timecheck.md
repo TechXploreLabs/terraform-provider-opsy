@@ -1,14 +1,11 @@
 
 ---
 page_title: "timecheck function - terraform-provider-opsy"
-subcategory: "Time Functions"
 description: |-
   Checks whether current date and time matches the slot
 ---
 
 # function: timecheck
-
-
 
 The time function `timecheck` checks whether current day and time matches the fixed slot day and time or not. It returns `true` if the day and time matches the fixed slot day and time. Otherwise, it returns `false`.
 

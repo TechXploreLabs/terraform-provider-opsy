@@ -8,14 +8,14 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/function"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 )
 
 var ocidResultAttrTypes = map[string]attr.Type{
-	"service":    types.StringType,
-	"region":     types.StringType,
+	"service": types.StringType,
+	"region":  types.StringType,
 }
 
 var (
@@ -43,7 +43,7 @@ func (r OCIFunction) Definition(_ context.Context, _ function.DefinitionRequest,
 				Name:               "ocid",
 			},
 		},
-		Return: function.ObjectReturn{		
+		Return: function.ObjectReturn{
 			AttributeTypes: ocidResultAttrTypes,
 		},
 	}
@@ -56,7 +56,7 @@ func (r OCIFunction) Run(ctx context.Context, req function.RunRequest, resp *fun
 	if resp.Error != nil {
 		return
 	}
-	
+
 	result, err := ocidparse(ocid)
 	if err != nil {
 		resp.Error = function.ConcatFuncErrors(resp.Error, function.NewFuncError(err.Error()))
@@ -69,16 +69,16 @@ func (r OCIFunction) Run(ctx context.Context, req function.RunRequest, resp *fun
 func ocidparse(ocid string) (types.Object, error) {
 	re := regexp.MustCompile(`\.`)
 	parts := re.Split(ocid, -1)
-	
+
 	if len(parts) != 5 {
 		return types.ObjectNull(ocidResultAttrTypes), fmt.Errorf("not a valid ocid")
 	}
-	
+
 	attrValues := map[string]attr.Value{
 		"service": types.StringValue(parts[1]),
 		"region":  types.StringValue(parts[3]),
 	}
-	
+
 	obj, diags := types.ObjectValue(ocidResultAttrTypes, attrValues)
 	if diags.HasError() {
 		return types.ObjectNull(ocidResultAttrTypes), fmt.Errorf("failed to create object: %v", diags)
