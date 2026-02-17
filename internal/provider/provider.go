@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 
+	"github.com/hashicorp/terraform-plugin-framework/action"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/function"
@@ -57,6 +58,12 @@ func (p *OpsyProvider) Functions(ctx context.Context) []func() function.Function
 		NewTimeCheckFunction,
 		NewGetEnvVarFunction,
 		NewOCIFunction,
+	}
+}
+
+func (p *OpsyProvider) Actions(ctx context.Context) []func() action.Action {
+	return []func() action.Action{
+		NewSeristackAction,
 	}
 }
 
