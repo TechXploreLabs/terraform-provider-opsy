@@ -50,11 +50,87 @@ action "opsy_seristack" "action2" {
   }
 }
 ```
-
 ```bash
 terraform apply -invoke=action.opsy_seristack.action1
 
 terraform apply -invoke=action.opsy_seristack.action2
+```
+Sample yaml file for triggering multicloud serverless function
+
+```yaml
+#config.yaml
+stacks:
+  # 1. AWS Lambda: Synchronous invocation
+  - name: aws_trigger
+    count: 1
+    cmds:
+      - |
+        aws lambda invoke \
+        --function-name {{.Vars.aws_function_name}} \
+        --cli-binary-format raw-in-base64-out \
+        --payload '{ "name": "Bob" }' \
+        response.json
+
+  # 2. GCP Cloud Function: HTTP-based trigger via identity token
+  - name: gcp_trigger
+    count: 1
+    cmds:
+      - |
+        gcloud functions call {{.Vars.gcp_function_name}} --region={{.Vars.region}} --gen2 --data '{"variable":"value"}'
+
+  # 3. OCI Function: Using OCID and raw body
+  - name: oci_trigger
+    count: 1
+    cmds:
+      - |
+        oci fn function invoke --function-id {{.Vars.oci_func_ocid}} --file "-" --body "" --fn-invoke-type "detached"
+
+  # 4. Azure Function: Trigger via Function App publish/REST call
+  - name: azure_trigger
+    count: 1
+    cmds:
+      - |
+        FUNC_KEY=$(az functionapp keys list \
+          --name {{.Vars.az_app_name}} \
+          --resource-group {{.Vars.az_rg_name}} \
+          --query "functionKeys.default" -o tsv)
+
+        curl --location --request POST 'https://{{.Vars.az_app_name}}.azurewebsites.net/api/{{.Vars.az_func_name}}?code=${FUNC_KEY}' \
+        --header 'Content-Type: application/json' \
+        --data-raw '{
+            "key": "value"
+        }'
+```
+
+```hcl
+terraform {
+  required_providers {
+    opsy = {
+      source = "registry.terraform.io/TechXploreLabs/opsy"
+    }
+  }
+}
+
+provider "opsy" {}
+
+variable "cloud_vars" {
+  default = {
+    aws_trigger = {aws_function_name = "myawsfunc"}
+    gcp_trigger = {gcp_function_name = "mygcpfunc", region="asia-south1"}
+    oci_trigger = {oci_func_ocid = "<UPDATE OCI FUNC OCID>"}
+    azure_trigger = {az_app_name = "myazapp", az_rg_name="myrg",az_func_name="myazfunc"}
+  }
+}
+
+action "opsy_seristack" "cloud_triggers" {
+  for_each = tomap(var.cloud_vars)
+  
+  config {
+    configfile = "${path.module}/config.yaml"
+    stackname  = each.key
+    vars = each.value
+  }
+}
 ```
 
 
