@@ -42,7 +42,9 @@ func (p *OpsyProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 }
 
 func (p *OpsyProvider) Resources(ctx context.Context) []func() resource.Resource {
-	return []func() resource.Resource{}
+	return []func() resource.Resource{
+		NewSeristackResource,
+	}
 }
 
 func (p *OpsyProvider) EphemeralResources(ctx context.Context) []func() ephemeral.EphemeralResource {
@@ -50,7 +52,9 @@ func (p *OpsyProvider) EphemeralResources(ctx context.Context) []func() ephemera
 }
 
 func (p *OpsyProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{}
+	return []func() datasource.DataSource{
+		NewSeristackDataSource,
+	}
 }
 
 func (p *OpsyProvider) Functions(ctx context.Context) []func() function.Function {
