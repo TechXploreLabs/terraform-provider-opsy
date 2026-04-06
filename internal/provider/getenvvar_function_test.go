@@ -12,7 +12,9 @@ import (
 )
 
 func TestGetEnvVarFunction(t *testing.T) {
-	t.Parallel()
+	t.Setenv("key1", "value1")
+	t.Setenv("key2", "")
+
 	resource.UnitTest(t, resource.TestCase{
 		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
 			tfversion.SkipBelow(version.Must(version.NewVersion(MinimalRequiredTerraformVersion))),

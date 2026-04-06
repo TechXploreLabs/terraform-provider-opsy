@@ -6,7 +6,13 @@ description: |-
 
 # Opsy Provider
 
-The Opsy provider for Terraform is a operational support provider that offers supports through provider-defined functions.
+The Opsy provider for Terraform executes seristack definitions from a zip bundle configured in the provider block.
+It supports:
+
+- resources (`opsy_seristack`)
+- data sources (`opsy_seristack`)
+- actions (`opsy_seristack`)
+- provider-defined functions
 
 ## Example Usage
 
@@ -26,4 +32,4 @@ terraform {
 
 ## Function Syntax
 
-You use the functions with a special syntax: `provider::opsy::<function_name>`. 
+You use the functions with a special syntax: `provider::opsy::<function_name>`.
