@@ -22,13 +22,15 @@ func NewSeristackAction() action.Action {
 }
 
 // SeristackAction defines the action implementation.
-type SeristackAction struct{}
+type SeristackAction struct {
+	scripts map[string]*opsyseristackaction.Config
+}
 
 // SeristackActionModel describes the action data model.
 type SeristackActionModel struct {
-	ConfigFile types.String `tfsdk:"configfile"`
-	StackName  types.String `tfsdk:"stackname"`
-	Vars       types.Map    `tfsdk:"vars"`
+	Type      types.String `tfsdk:"type"`
+	StackName types.String `tfsdk:"stackname"`
+	Vars      types.Map    `tfsdk:"vars"`
 }
 
 func (e *SeristackAction) Metadata(ctx context.Context, req action.MetadataRequest, resp *action.MetadataResponse) {
@@ -41,8 +43,8 @@ func (e *SeristackAction) Schema(ctx context.Context, req action.SchemaRequest, 
 		MarkdownDescription: "Seristack action for stack execution",
 
 		Attributes: map[string]schema.Attribute{
-			"configfile": schema.StringAttribute{
-				MarkdownDescription: "Configfuration file",
+			"type": schema.StringAttribute{
+				MarkdownDescription: "Resource type name. Maps to `<type>.yaml` inside the scripts bundle.",
 				Required:            true,
 			},
 			"stackname": schema.StringAttribute{
@@ -59,6 +61,28 @@ func (e *SeristackAction) Schema(ctx context.Context, req action.SchemaRequest, 
 }
 
 func (e *SeristackAction) Configure(ctx context.Context, req action.ConfigureRequest, resp *action.ConfigureResponse) {
+	if req.ProviderData == nil {
+		return
+	}
+
+	provider, ok := req.ProviderData.(*OpsyProvider)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Provider Data Type",
+			fmt.Sprintf("Expected *OpsyProvider, got %T.", req.ProviderData),
+		)
+		return
+	}
+
+	if provider.scripts == nil {
+		resp.Diagnostics.AddError(
+			"Opsy Provider Not Configured",
+			"The seristack action was initialised before the provider successfully loaded its scripts bundle.",
+		)
+		return
+	}
+
+	e.scripts = provider.scripts
 }
 
 func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, resp *action.InvokeResponse) {
@@ -84,10 +108,17 @@ func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, 
 		}
 	}
 
-	result, err := opsyseristackaction.OpsySeristack(opsyseristackaction.Config{
-		ConfigFile: data.ConfigFile.ValueString(),
-		StackName:  data.StackName.ValueString(),
-		Vars:       vars,
+	def, ok := e.scripts[data.Type.ValueString()]
+	if !ok {
+		resp.Diagnostics.AddError("Seristack Type Error", fmt.Sprintf("type %q not found in scripts bundle", data.Type.ValueString()))
+		return
+	}
+
+	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
+		Config:    def.Config,
+		StackName: data.StackName.ValueString(),
+		Vars:      vars,
+		Format:    "json",
 	})
 
 	if err != nil {
