@@ -1,93 +1,61 @@
 stacks:
 - name: DATASOURCE
   count: 1
+  vars:
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
   cmds:
   - |
-    unset OCI_CLI_AUTH
-    CONFIG="--config-file <update config file path> --profile DEFAULT"
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
 
-    namespace_raw="{{.Vars.namespace}}"
-    name_raw="{{.Vars.name}}"
-
-    if [ -z "$namespace_raw" ] || [ "$namespace_raw" = "<no value>" ] || [ -z "$name_raw" ] || [ "$name_raw" = "<no value>" ]; then
-      echo "namespace and name are required for DATASOURCE" >&2
-      exit 1
-    fi
-
-    bucket_json="$(oci $CONFIG os bucket get --namespace "$namespace_raw" --name "$name_raw")" || exit 1
+    cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    bucket_json="$(${cmd[@]})" || exit 1
 
     jq -n \
-      --arg id "$namespace_raw/$name_raw" \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
       --argjson data_result "$bucket_json" \
       '{id: $id, output: {bucket: $data_result.data}}'
 
 - name: CREATE
   count: 1
+  vars:
+  - name: compartment_id
+    required: true
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
+  - name: storage_tier
+    value: Standard
+  - name: auto_tiering
+    value: null
+  - name: versioning
+    value: Disabled
+  - name: kms_key_id
+    value: null
+  - name: freeform_tags_json
+    value: null
+  - name: defined_tags_json
+    value: null
   cmds:
   - |
-    unset OCI_CLI_AUTH
-    CONFIG="--config-file <update config file path> --profile DEFAULT"
-
-    compartment_id_raw="{{.Vars.compartment_id}}"
-    namespace_raw="{{.Vars.namespace}}"
-    name_raw="{{.Vars.name}}"
-    storage_tier_raw="{{.Vars.storage_tier}}"
-    auto_tiering_raw="{{.Vars.auto_tiering}}"
-    versioning_raw="{{.Vars.versioning}}"
-    kms_key_id_raw="{{.Vars.kms_key_id}}"
-    freeform_tags_raw='{{.Vars.freeform_tags_json}}'
-    defined_tags_raw='{{.Vars.defined_tags_json}}'
-
-    normalize_optional() {
-      local value="$1"
-      if [ -z "$value" ] || [ "$value" = "<no value>" ]; then
-        echo ""
-      else
-        echo "$value"
-      fi
-    }
-
-    normalize_json_optional() {
-      local value="$1"
-      if [ -z "$value" ] || [ "$value" = "<no value>" ]; then
-        echo ""
-      else
-        echo "$value" | jq -c . 2>/dev/null || return 1
-      fi
-    }
-
-    missing=false
-    if [ -z "$compartment_id_raw" ] || [ "$compartment_id_raw" = "<no value>" ]; then
-      echo "compartment_id is required" >&2; missing=true
-    fi
-    if [ -z "$namespace_raw" ] || [ "$namespace_raw" = "<no value>" ]; then
-      echo "namespace is required" >&2; missing=true
-    fi
-    if [ -z "$name_raw" ] || [ "$name_raw" = "<no value>" ]; then
-      echo "name is required" >&2; missing=true
-    fi
-    if [ "$missing" = true ]; then
-      echo "compartment_id, namespace, and name are required." >&2
-      exit 1
-    fi
-
-    compartment_id="$compartment_id_raw"
-    namespace="$namespace_raw"
-    name="$name_raw"
-    storage_tier="$(normalize_optional "$storage_tier_raw")"
-    auto_tiering="$(normalize_optional "$auto_tiering_raw")"
-    versioning="$(normalize_optional "$versioning_raw")"
-    kms_key_id="$(normalize_optional "$kms_key_id_raw")"
-    freeform_tags="$(normalize_json_optional "$freeform_tags_raw")" || { echo "freeform_tags_json must be valid JSON" >&2; exit 1; }
-    defined_tags="$(normalize_json_optional "$defined_tags_raw")" || { echo "defined_tags_json must be valid JSON" >&2; exit 1; }
-
-    cmd=(oci $CONFIG os bucket create --compartment-id "$compartment_id" --namespace "$namespace" --name "$name")
-    [ -n "$storage_tier" ] && cmd+=(--storage-tier "$storage_tier")
-    [ -n "$auto_tiering" ] && cmd+=(--auto-tiering "$auto_tiering")
-    [ -n "$versioning" ] && cmd+=(--versioning "$versioning")
-    [ -n "$kms_key_id" ] && cmd+=(--kms-key-id "$kms_key_id")
-    [ -n "$freeform_tags" ] && cmd+=(--freeform-tags "$freeform_tags")
-    [ -n "$defined_tags" ] && cmd+=(--defined-tags "$defined_tags")
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket create --region {{.Vars.region}} --compartment-id {{.Vars.compartment_id}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    # cmd=(oci $CONFIG os bucket create --region {{.Vars.region}} --compartment-id {{.Vars.compartment_id}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    [ -n "{{.Vars.storage_tier}}" ] && cmd+=(--storage-tier {{.Vars.storage_tier}})
+    [ -n "{{.Vars.auto_tiering}}" ] && cmd+=(--auto-tiering {{.Vars.auto_tiering}})
+    [ -n "{{.Vars.versioning}}" ] && cmd+=(--versioning {{.Vars.versioning}})
+    [ -n "{{.Vars.kms_key_id}}" ] && cmd+=(--kms-key-id {{.Vars.kms_key_id}})
+    [ -n '{{.Vars.freeform_tags_json}}' ] && cmd+=(--freeform-tags '{{.Vars.freeform_tags_json}}')
+    [ -n '{{.Vars.defined_tags_json}}' ] && cmd+=(--defined-tags '{{.Vars.defined_tags_json}}')
 
     set +e
     created_json="$(${cmd[@]} 2>&1)"
@@ -99,26 +67,29 @@ stacks:
     fi
 
     jq -n \
-      --arg id "$namespace/$name" \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
       --argjson create_result "$created_json" \
       '{id: $id, output: {bucket: $create_result.data}}'
 
 - name: READ
   count: 1
+  vars:
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
   cmds:
   - |
-    unset OCI_CLI_AUTH
-    CONFIG="--config-file <update config file path> --profile DEFAULT"
-
-    namespace_raw="{{.Vars.namespace}}"
-    name_raw="{{.Vars.name}}"
-    if [ -z "$namespace_raw" ] || [ "$namespace_raw" = "<no value>" ] || [ -z "$name_raw" ] || [ "$name_raw" = "<no value>" ]; then
-      echo "namespace and name are required for READ" >&2
-      exit 1
-    fi
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
 
     set +e
-    bucket_json="$(oci $CONFIG os bucket get --namespace "$namespace_raw" --name "$name_raw" 2>&1)"
+    cmd=(oci os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+
+    #cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    bucket_json="$(${cmd[@]} 2>&1)"
     rc=$?
     set -e
 
@@ -132,60 +103,43 @@ stacks:
     fi
 
     jq -n \
-      --arg id "$namespace_raw/$name_raw" \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
       --argjson read_result "$bucket_json" \
       '{id: $id, output: {bucket: $read_result.data}}'
 
 - name: UPDATE
   count: 1
+  vars:
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
+  - name: compartment_id
+    required: true
+  - name: auto_tiering
+    value: null
+  - name: versioning
+    value: Disabled
+  - name: freeform_tags_json
+    value: null
+  - name: defined_tags_json
+    value: null
+  - name: storage_tier
+    value: Standard
   cmds:
   - |
-    unset OCI_CLI_AUTH
-    CONFIG="--config-file <update config file path> --profile DEFAULT"
-
-    namespace_raw="{{.Vars.namespace}}"
-    name_raw="{{.Vars.name}}"
-    compartment_id_raw="{{.Vars.compartment_id}}"
-    auto_tiering_raw="{{.Vars.auto_tiering}}"
-    versioning_raw="{{.Vars.versioning}}"
-    freeform_tags_raw='{{.Vars.freeform_tags_json}}'
-    defined_tags_raw='{{.Vars.defined_tags_json}}'
-
-    normalize_optional() {
-      local value="$1"
-      if [ -z "$value" ] || [ "$value" = "<no value>" ]; then
-        echo ""
-      else
-        echo "$value"
-      fi
-    }
-
-    normalize_json_optional() {
-      local value="$1"
-      if [ -z "$value" ] || [ "$value" = "<no value>" ]; then
-        echo ""
-      else
-        echo "$value" | jq -c . 2>/dev/null || return 1
-      fi
-    }
-
-    if [ -z "$namespace_raw" ] || [ "$namespace_raw" = "<no value>" ] || [ -z "$name_raw" ] || [ "$name_raw" = "<no value>" ]; then
-      echo "namespace and name are required for UPDATE" >&2
-      exit 1
-    fi
-
-    auto_tiering="$(normalize_optional "$auto_tiering_raw")"
-    versioning="$(normalize_optional "$versioning_raw")"
-    compartment_id="$(normalize_optional "$compartment_id_raw")"
-    freeform_tags="$(normalize_json_optional "$freeform_tags_raw")" || { echo "freeform_tags_json must be valid JSON" >&2; exit 1; }
-    defined_tags="$(normalize_json_optional "$defined_tags_raw")" || { echo "defined_tags_json must be valid JSON" >&2; exit 1; }
-
-    cmd=(oci $CONFIG os bucket update --namespace "$namespace_raw" --name "$name_raw")
-    [ -n "$compartment_id" ] && cmd+=(--compartment-id "$compartment_id")
-    [ -n "$auto_tiering" ] && cmd+=(--auto-tiering "$auto_tiering")
-    [ -n "$versioning" ] && cmd+=(--versioning "$versioning")
-    [ -n "$freeform_tags" ] && cmd+=(--freeform-tags "$freeform_tags")
-    [ -n "$defined_tags" ] && cmd+=(--defined-tags "$defined_tags")
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket update --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+  
+    # cmd=(oci $CONFIG os bucket update --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    [ -n "{{.Vars.compartment_id}}" ] && cmd+=(--compartment-id {{.Vars.compartment_id}})
+    [ -n "{{.Vars.auto_tiering}}" ] && cmd+=(--auto-tiering {{.Vars.auto_tiering}})
+    [ -n "{{.Vars.versioning}}" ] && cmd+=(--versioning {{.Vars.versioning}})
+    [ -n '{{.Vars.freeform_tags_json}}' ] && cmd+=(--freeform-tags '{{.Vars.freeform_tags_json}}')
+    [ -n '{{.Vars.defined_tags_json}}' ] && cmd+=(--defined-tags '{{.Vars.defined_tags_json}}')
 
     set +e
     updated_json="$(${cmd[@]} 2>&1)"
@@ -197,31 +151,32 @@ stacks:
     fi
 
     jq -n \
-      --arg id "$namespace_raw/$name_raw" \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
       --argjson update_result "$updated_json" \
       '{id: $id, output: {bucket: $update_result.data}}'
 
 - name: DELETE
   count: 1
+  vars:
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
   cmds:
   - |
-    unset OCI_CLI_AUTH
-    CONFIG="--config-file <update config file path> --profile DEFAULT"
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket delete --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}} --force)
 
-    namespace_raw="{{.Vars.namespace}}"
-    name_raw="{{.Vars.name}}"
+    # cmd=(oci $CONFIG os bucket delete --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}} --force)
+    "${cmd[@]}" || exit 1
 
-    if [ -z "$namespace_raw" ] || [ "$namespace_raw" = "<no value>" ] || [ -z "$name_raw" ] || [ "$name_raw" = "<no value>" ]; then
-      echo "namespace and name are required for DELETE" >&2
-      exit 1
-    fi
-
-    oci $CONFIG os bucket delete --namespace "$namespace_raw" --name "$name_raw" --force || exit 1
-
-    jq -n --arg id "$namespace_raw/$name_raw" '{id: $id, output: {deleted: true}}'
+    jq -n --arg id "{{.Vars.namespace}}/{{.Vars.name}}" '{id: $id, output: {deleted: true}}'
 
 - name: RECREATE_ON
   count: 1
   cmds:
   - |
-    jq -n '["namespace", "name"]'
+    jq -n '["namespace", "name", "region"]'

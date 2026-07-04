@@ -1,5 +1,7 @@
 stacks:
 - name: function_1
   count: 1
+  vars:
+  - name: name
   cmds:
   - echo "hi {{.Vars.name}} from function_1"

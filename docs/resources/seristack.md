@@ -9,7 +9,7 @@ description: |-
 
 Manages infrastructure using seristack stacks loaded from the provider zip bundle.
 
-The `type` value maps to `<type>.yaml` (or `.yml`) inside the configured bundle.
+The `type` value maps to `<type>.yaml` (or `.yml`) inside the configured bundle(archive.zip).
 For example, `type = "oci_bucket"` resolves `oci_bucket.yaml`.
 
 Resource lifecycle maps to seristack stack names:

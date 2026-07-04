@@ -10,7 +10,7 @@ description: |-
 
 Runs a specific stack from a seristack type definition loaded from the provider zip bundle.
 
-The `type` value maps to `<type>.yaml` (or `.yml`) inside the configured bundle.
+The `type` value maps to `<type>.yaml` (or `.yml`) inside the configured bundle(archive.zip)..
 For example, `type = "function"` resolves `function.yaml`.
 
 To know more about seristack, please visit [seristack](https://seristack.getsaas.in/).

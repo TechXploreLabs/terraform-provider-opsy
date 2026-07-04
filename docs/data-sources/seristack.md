@@ -9,7 +9,7 @@ description: |-
 
 Reads data by executing the `DATASOURCE` stack from a seristack type definition in the provider zip bundle.
 
-The `type` value maps to `<type>.yaml` (or `.yml`) inside the configured bundle.
+The `type` value maps to `<type>.yaml` (or `.yml`) inside the configured bundle(archive.zip).
 For example, `type = "oci_bucket"` resolves `oci_bucket.yaml`.
 
 ```terraform

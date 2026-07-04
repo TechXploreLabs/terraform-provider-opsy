@@ -17,13 +17,14 @@ provider "opsy" {
 resource "opsy_seristack" "testing1" {
     type = "oci_bucket"
     vars = {
-        compartment_id = "ocid1.tenancy."
-        namespace      = "namespacename"
-        name           = "opsy-testing"
+        compartment_id = "ocid1.compartment.oc1.."
+        namespace      = "yournamespace"
+        name           = "bucketname"
         storage_tier   = "Standard"
+        region         = "eu-frankfurt-1"
         freeform_tags_json = jsonencode({
-          env   = "prod"
-          owner = "opsy"
+          env   = "dev"
+          owner = "john"
         })
     }
 }
@@ -36,8 +37,9 @@ output "testing1" {
 data "opsy_seristack" "testing1" {
   type = "oci_bucket"
   vars = {
-    namespace = "namespacename"
-    name = "bucket-compartment-id"
+    namespace = "yournamespace"
+    name = "bucket"
+    region = "eu-frankfurt-1"
   }
 }
 
