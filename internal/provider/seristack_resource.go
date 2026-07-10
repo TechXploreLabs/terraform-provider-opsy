@@ -281,7 +281,28 @@ func (r *SeristackResource) Read(ctx context.Context, req resource.ReadRequest, 
 	}
 
 	state.Output = types.StringValue(extractOutputFromOutput(result.Output))
+
+	refreshedVars, foundVars, diags := extractVarsFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if foundVars && len(refreshedVars) > 0 {
+		mergedVars := flattenVars(state.Vars)
+		for key, value := range refreshedVars {
+			mergedVars[key] = value
+		}
+
+		varsValue, mapDiags := types.MapValueFrom(ctx, types.StringType, mergedVars)
+		resp.Diagnostics.Append(mapDiags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		state.Vars = varsValue
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
+
 }
 
 func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {

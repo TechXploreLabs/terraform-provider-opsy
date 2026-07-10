@@ -74,12 +74,26 @@ stacks:
 - name: READ
   count: 1
   vars:
+  - name: compartment_id
+    required: true
   - name: namespace
     required: true
   - name: name
     required: true
   - name: region
     required: true
+  - name: storage_tier
+    value: Standard
+  - name: auto_tiering
+    value: null
+  - name: versioning
+    value: Disabled
+  - name: kms_key_id
+    value: null
+  - name: freeform_tags_json
+    value: null
+  - name: defined_tags_json
+    value: null
   cmds:
   - |
     # unset OCI_CLI_AUTH
@@ -102,10 +116,45 @@ stacks:
       exit $rc
     fi
 
+    vars_json='{}'
+
+    # Compare actual OCI values with the vars currently in Terraform state.
+    # If a managed value drifted, return that actual value under top-level
+    # `vars` so the provider can refresh state and Terraform can plan the
+    # configured value back during UPDATE.
+
+    actual_compartment_id="$(printf '%s' "$bucket_json" | jq -r '.data."compartment-id" // ""')"
+    if [ -n "{{.Vars.compartment_id}}" ] && [ "$actual_compartment_id" != "{{.Vars.compartment_id}}" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_compartment_id" '. + {compartment_id: $v}')"
+    fi
+
+    actual_auto_tiering="$(printf '%s' "$bucket_json" | jq -r '.data."auto-tiering" // ""')"
+    if [ -n "{{.Vars.auto_tiering}}" ] && [ "$actual_auto_tiering" != "{{.Vars.auto_tiering}}" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_auto_tiering" '. + {auto_tiering: $v}')"
+    fi
+
+    actual_versioning="$(printf '%s' "$bucket_json" | jq -r '.data.versioning // ""')"
+    if [ -n "{{.Vars.versioning}}" ] && [ "$actual_versioning" != "{{.Vars.versioning}}" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_versioning" '. + {versioning: $v}')"
+    fi
+
+    actual_freeform_tags_json="$(printf '%s' "$bucket_json" | jq -cS '.data."freeform-tags" // {}')"
+    desired_freeform_tags_json="$(printf '%s' '{{.Vars.freeform_tags_json}}' | jq -cS '. // {}' 2>/dev/null || printf '%s' '{{.Vars.freeform_tags_json}}')"
+    if [ -n '{{.Vars.freeform_tags_json}}' ] && [ "$actual_freeform_tags_json" != "$desired_freeform_tags_json" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_freeform_tags_json" '. + {freeform_tags_json: $v}')"
+    fi
+
+    actual_defined_tags_json="$(printf '%s' "$bucket_json" | jq -cS '.data."defined-tags" // {}')"
+    desired_defined_tags_json="$(printf '%s' '{{.Vars.defined_tags_json}}' | jq -cS '. // {}' 2>/dev/null || printf '%s' '{{.Vars.defined_tags_json}}')"
+    if [ -n '{{.Vars.defined_tags_json}}' ] && [ "$actual_defined_tags_json" != "$desired_defined_tags_json" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_defined_tags_json" '. + {defined_tags_json: $v}')"
+    fi
+
     jq -n \
       --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
       --argjson read_result "$bucket_json" \
-      '{id: $id, output: {bucket: $read_result.data}}'
+      --argjson vars "$vars_json" \
+      '{id: $id, vars: $vars, output: {bucket: $read_result.data}}'
 
 - name: UPDATE
   count: 1
@@ -137,7 +186,7 @@ stacks:
     # cmd=(oci $CONFIG os bucket update --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
     [ -n "{{.Vars.compartment_id}}" ] && cmd+=(--compartment-id {{.Vars.compartment_id}})
     [ -n "{{.Vars.auto_tiering}}" ] && cmd+=(--auto-tiering {{.Vars.auto_tiering}})
-    [ -n "{{.Vars.versioning}}" ] && cmd+=(--versioning {{.Vars.versioning}})
+    [ -n "{{.Vars.versioning}}" ] && [ "{{.Vars.versioning}}" != "Disabled" ] && cmd+=(--versioning {{.Vars.versioning}})
     [ -n '{{.Vars.freeform_tags_json}}' ] && cmd+=(--freeform-tags '{{.Vars.freeform_tags_json}}')
     [ -n '{{.Vars.defined_tags_json}}' ] && cmd+=(--defined-tags '{{.Vars.defined_tags_json}}')
 
@@ -179,4 +228,4 @@ stacks:
   count: 1
   cmds:
   - |
-    jq -n '["namespace", "name", "region"]'
+    jq -n '["compartment_id", "namespace", "name", "region", "freeform_tags_json"]'
