@@ -17,9 +17,9 @@ provider "opsy" {
 resource "opsy_seristack" "testing1" {
     type = "oci_bucket"
     vars = {
-        compartment_id = "ocid1.compartment.oc1.."
-        namespace      = "yournamespace"
-        name           = "bucketname"
+        compartment_id = "ocid1.compartment.oc1"
+        namespace      = "iotdev"
+        name           = "testing"
         storage_tier   = "Standard"
         region         = "eu-frankfurt-1"
         freeform_tags_json = jsonencode({
