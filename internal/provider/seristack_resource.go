@@ -170,7 +170,7 @@ func (r *SeristackResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 		return
 	}
 
-	var stateVars, planVars map[string]string
+	var stateVars, planVars map[string]types.String
 	resp.Diagnostics.Append(state.Vars.ElementsAs(ctx, &stateVars, false)...)
 	resp.Diagnostics.Append(plan.Vars.ElementsAs(ctx, &planVars, false)...)
 	if resp.Diagnostics.HasError() {
@@ -178,7 +178,14 @@ func (r *SeristackResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	}
 
 	for _, key := range recreateKeys {
-		if stateVars[key] != planVars[key] {
+		stateValue := stateVars[key]
+		planValue := planVars[key]
+		if stateValue.IsUnknown() || planValue.IsUnknown() {
+			tflog.Debug(ctx, "ModifyPlan: recreate_on key has unknown value, deferring replacement decision",
+				map[string]any{"type": plan.Type.ValueString(), "key": key})
+			continue
+		}
+		if !stateValue.Equal(planValue) {
 			tflog.Debug(ctx, "ModifyPlan: recreate_on key changed → RequiresReplace",
 				map[string]any{"type": plan.Type.ValueString(), "key": key})
 			resp.RequiresReplace = append(resp.RequiresReplace, path.Root("vars"))
@@ -506,6 +513,9 @@ func mergeVars(_ context.Context, vars types.Map, sensitive types.Map) map[strin
 	}
 	for k, v := range sensitive.Elements() {
 		if sv, ok := v.(types.String); ok {
+			if sv.IsNull() || sv.IsUnknown() {
+				continue
+			}
 			merged[k] = sv.ValueString()
 		}
 	}
@@ -519,6 +529,9 @@ func flattenVars(vars types.Map) map[string]string {
 	}
 	for k, v := range vars.Elements() {
 		if sv, ok := v.(types.String); ok {
+			if sv.IsNull() || sv.IsUnknown() {
+				continue
+			}
 			out[k] = sv.ValueString()
 		}
 	}
