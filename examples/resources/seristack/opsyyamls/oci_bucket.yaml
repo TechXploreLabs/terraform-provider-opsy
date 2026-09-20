@@ -74,6 +74,8 @@ stacks:
 - name: READ
   count: 1
   vars:
+  - name: id
+    required: true
   - name: compartment_id
     required: true
   - name: namespace
@@ -159,6 +161,8 @@ stacks:
 - name: UPDATE
   count: 1
   vars:
+  - name: id
+    required: true
   - name: namespace
     required: true
   - name: name
@@ -207,6 +211,8 @@ stacks:
 - name: DELETE
   count: 1
   vars:
+  - name: id
+    required: true
   - name: namespace
     required: true
   - name: name
