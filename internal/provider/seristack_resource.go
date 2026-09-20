@@ -356,14 +356,6 @@ func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateReque
 		return
 	}
 
-	if newID := extractIDFromOutput(result.Output); newID != "" && newID != state.ID.ValueString() {
-		tflog.Debug(ctx, "Seristack Update: stack returned new id",
-			map[string]any{"old_id": state.ID.ValueString(), "new_id": newID})
-		plan.ID = types.StringValue(newID)
-	} else {
-		plan.ID = state.ID
-	}
-
 	plan.Output = types.StringValue(extractOutputFromOutput(result.Output))
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
