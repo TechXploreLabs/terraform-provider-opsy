@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	opsyseristackaction "github.com/TechXploreLabs/seristack/pkg/opsy"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -33,11 +34,11 @@ func NewSeristackResource() resource.Resource {
 }
 
 type SeristackResourceModel struct {
-	ID        types.String `tfsdk:"id"`
-	Type      types.String `tfsdk:"type"`
-	Vars      types.Map    `tfsdk:"vars"`
-	Sensitive types.Map    `tfsdk:"sensitive"`
-	Output    types.String `tfsdk:"output"`
+	ID        types.String  `tfsdk:"id"`
+	Type      types.String  `tfsdk:"type"`
+	Vars      types.Map     `tfsdk:"vars"`
+	Sensitive types.Map     `tfsdk:"sensitive"`
+	Output    types.Dynamic `tfsdk:"output"`
 }
 
 type seristackImportData struct {
@@ -86,9 +87,9 @@ func (r *SeristackResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 					"(tokens, passwords, keys). Merged on top of `vars` at execution time. " +
 					"Never stored in state.",
 			},
-			"output": schema.StringAttribute{
+			"output": schema.DynamicAttribute{
 				Computed:            true,
-				MarkdownDescription: "JSON string of the output returned by the last stack execution.",
+				MarkdownDescription: "Structured output returned by the last stack execution.",
 			},
 		},
 	}
@@ -120,6 +121,15 @@ func (r *SeristackResource) Configure(ctx context.Context, req resource.Configur
 	tflog.Debug(ctx, "SeristackResource configured", map[string]any{"types_available": len(provider.scripts)})
 }
 
+// ModifyPlan does two things when `vars` changed:
+//
+//  1. RECREATE_ON: if a listed var changed, force replacement (unchanged
+//     behaviour).
+//  2. OUTPUT_CHANGES_ON (optional stack): returns a JSON array of top-level
+//     `output` keys that an UPDATE may change. Only those keys are planned as
+//     "known after apply"; every other key keeps its value from state. If the
+//     stack is missing or fails, the whole `output` stays unknown (the
+//     framework default).
 func (r *SeristackResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
 		return
@@ -136,55 +146,130 @@ func (r *SeristackResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 		return
 	}
 
-	def, err := r.resolveType(plan.Type.ValueString())
+	typeName := plan.Type.ValueString()
+
+	def, err := r.resolveType(typeName)
 	if err != nil {
 		return
 	}
 
 	vars := flattenVars(plan.Vars)
-	result, stackErr := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "RECREATE_ON",
-		Vars:      vars,
-		Format:    "json",
-	})
-	if stackErr != nil {
+
+	// ---- 1. RECREATE_ON -------------------------------------------------
+	recreateKeys, err := runKeyListStack(def, "RECREATE_ON", vars)
+	if err != nil {
 		resp.Diagnostics.AddWarning("recreate_on stack execution error",
-			fmt.Sprintf("Failed to execute recreate_on stack for type %q: %v", plan.Type.ValueString(), stackErr))
-		return
-	}
-	if !result.Success {
-		resp.Diagnostics.AddWarning("recreate_on stack execution failed",
-			fmt.Sprintf("Stack %q failed: %s", result.Name, result.Error))
+			fmt.Sprintf("Failed to execute recreate_on stack for type %q: %v", typeName, err))
 		return
 	}
 
-	var recreateKeys []string
-	if err := json.Unmarshal([]byte(result.Output), &recreateKeys); err != nil {
-		resp.Diagnostics.AddWarning("recreate_on output parse error",
-			fmt.Sprintf("Type %q recreate_on stack must return a JSON array of strings, got: %s", plan.Type.ValueString(), result.Output))
+	if len(recreateKeys) > 0 {
+		var stateVars, planVars map[string]string
+		resp.Diagnostics.Append(state.Vars.ElementsAs(ctx, &stateVars, false)...)
+		resp.Diagnostics.Append(plan.Vars.ElementsAs(ctx, &planVars, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		for _, key := range recreateKeys {
+			if stateVars[key] != planVars[key] {
+				tflog.Debug(ctx, "ModifyPlan: recreate_on key changed → RequiresReplace",
+					map[string]any{"type": typeName, "key": key})
+				resp.RequiresReplace = append(resp.RequiresReplace, path.Root("vars"))
+				return
+			}
+		}
+	}
+
+	// ---- 2. OUTPUT_CHANGES_ON ------------------------------------------
+	// Only touch output when the framework left it fully unknown.
+	if !plan.Output.IsUnknown() {
 		return
 	}
 
-	if len(recreateKeys) == 0 {
+	volatileKeys, err := runKeyListStack(def, "OUTPUT_CHANGES_ON", vars)
+	if err != nil {
+		tflog.Debug(ctx, "ModifyPlan: OUTPUT_CHANGES_ON not available, output stays fully unknown",
+			map[string]any{"type": typeName, "error": err.Error()})
+		return
+	}
+	if len(volatileKeys) == 0 {
 		return
 	}
 
-	var stateVars, planVars map[string]string
-	resp.Diagnostics.Append(state.Vars.ElementsAs(ctx, &stateVars, false)...)
-	resp.Diagnostics.Append(plan.Vars.ElementsAs(ctx, &planVars, false)...)
+	partial, diags := partiallyUnknownOutput(ctx, state.Output, volatileKeys)
+	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	for _, key := range recreateKeys {
-		if stateVars[key] != planVars[key] {
-			tflog.Debug(ctx, "ModifyPlan: recreate_on key changed → RequiresReplace",
-				map[string]any{"type": plan.Type.ValueString(), "key": key})
-			resp.RequiresReplace = append(resp.RequiresReplace, path.Root("vars"))
-			return
-		}
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("output"), partial)...)
+}
+
+// runKeyListStack runs a stack that must print a JSON array of strings.
+func runKeyListStack(def *opsyseristackaction.Config, stackName string, vars map[string]string) ([]string, error) {
+	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
+		Config:    def.Config,
+		StackName: stackName,
+		Vars:      vars,
+		Format:    "json",
+	})
+	if err != nil {
+		return nil, err
 	}
+	if !result.Success {
+		return nil, fmt.Errorf("stack %q failed: %s", result.Name, result.Error)
+	}
+
+	var keys []string
+	if err := json.Unmarshal([]byte(result.Output), &keys); err != nil {
+		return nil, fmt.Errorf("stack %q must return a JSON array of strings, got: %s", stackName, result.Output)
+	}
+	return keys, nil
+}
+
+// partiallyUnknownOutput copies the prior output object and replaces only the
+// listed top-level keys with unknown values. Keys not present in the prior
+// output are ignored. If the prior output is not a known object, the whole
+// output is returned as unknown.
+func partiallyUnknownOutput(ctx context.Context, prior types.Dynamic, volatile []string) (types.Dynamic, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if prior.IsNull() || prior.IsUnknown() ||
+		prior.IsUnderlyingValueNull() || prior.IsUnderlyingValueUnknown() {
+		return types.DynamicUnknown(), diags
+	}
+
+	obj, ok := prior.UnderlyingValue().(types.Object)
+	if !ok {
+		return types.DynamicUnknown(), diags
+	}
+
+	priorTypes := obj.AttributeTypes(ctx)
+	priorAttrs := obj.Attributes()
+
+	newTypes := make(map[string]attr.Type, len(priorTypes))
+	newAttrs := make(map[string]attr.Value, len(priorAttrs))
+	for k, t := range priorTypes {
+		newTypes[k] = t
+		newAttrs[k] = priorAttrs[k]
+	}
+
+	for _, k := range volatile {
+		if _, exists := newAttrs[k]; !exists {
+			continue
+		}
+		newTypes[k] = types.DynamicType
+		newAttrs[k] = types.DynamicUnknown()
+	}
+
+	newObj, d := types.ObjectValue(newTypes, newAttrs)
+	diags.Append(d...)
+	if diags.HasError() {
+		return types.DynamicUnknown(), diags
+	}
+
+	return types.DynamicValue(newObj), diags
 }
 
 func (r *SeristackResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -234,7 +319,15 @@ func (r *SeristackResource) Create(ctx context.Context, req resource.CreateReque
 	tflog.Debug(ctx, "Seristack Create: success", map[string]any{"id": id})
 
 	plan.ID = types.StringValue(id)
-	plan.Output = types.StringValue(extractOutputFromOutput(result.Output))
+
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	plan.Output = output
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -252,7 +345,13 @@ func (r *SeristackResource) Read(ctx context.Context, req resource.ReadRequest, 
 
 	vars := flattenVars(state.Vars)
 	vars["id"] = state.ID.ValueString()
-	vars["_output"] = state.Output.ValueString()
+	outputJSON, err := dynamicValueToJSON(state.Output)
+	if err != nil {
+		resp.Diagnostics.AddError("Output Serialization Error", err.Error())
+		return
+	}
+
+	vars["_output"] = outputJSON
 
 	tflog.Debug(ctx, "Seristack Read: running stack",
 		map[string]any{"type": state.Type.ValueString(), "stack": "READ", "id": state.ID.ValueString()})
@@ -280,7 +379,14 @@ func (r *SeristackResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	}
 
-	state.Output = types.StringValue(extractOutputFromOutput(result.Output))
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	state.Output = output
 
 	refreshedVars, foundVars, diags := extractVarsFromOutput(result.Output)
 	resp.Diagnostics.Append(diags...)
@@ -335,7 +441,13 @@ func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateReque
 
 	vars := mergeVars(ctx, plan.Vars, config.Sensitive)
 	vars["id"] = state.ID.ValueString()
-	vars["_output"] = state.Output.ValueString()
+	outputJSON, err := dynamicValueToJSON(state.Output)
+	if err != nil {
+		resp.Diagnostics.AddError("Output Serialization Error", err.Error())
+		return
+	}
+
+	vars["_output"] = outputJSON
 
 	tflog.Debug(ctx, "Seristack Update: running stack",
 		map[string]any{"type": plan.Type.ValueString(), "stack": "UPDATE", "id": state.ID.ValueString()})
@@ -356,7 +468,15 @@ func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateReque
 		return
 	}
 
-	plan.Output = types.StringValue(extractOutputFromOutput(result.Output))
+	plan.ID = state.ID
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	plan.Output = output
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -374,7 +494,13 @@ func (r *SeristackResource) Delete(ctx context.Context, req resource.DeleteReque
 
 	vars := flattenVars(state.Vars)
 	vars["id"] = state.ID.ValueString()
-	vars["_output"] = state.Output.ValueString()
+	outputJSON, err := dynamicValueToJSON(state.Output)
+	if err != nil {
+		resp.Diagnostics.AddError("Output Serialization Error", err.Error())
+		return
+	}
+
+	vars["_output"] = outputJSON
 
 	tflog.Debug(ctx, "Seristack Delete: running stack",
 		map[string]any{"type": state.Type.ValueString(), "stack": "DELETE", "id": state.ID.ValueString()})
@@ -451,12 +577,19 @@ func (r *SeristackResource) ImportState(ctx context.Context, req resource.Import
 		return
 	}
 
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	data := SeristackResourceModel{
 		ID:        types.StringValue(imp.ID),
 		Type:      types.StringValue(imp.Type),
 		Vars:      varsValue,
 		Sensitive: types.MapNull(types.StringType),
-		Output:    types.StringValue(extractOutputFromOutput(result.Output)),
+		Output:    output,
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)

@@ -23,10 +23,10 @@ type SeristackDataSource struct {
 }
 
 type SeristackDataSourceModel struct {
-	Type   types.String `tfsdk:"type"`
-	Vars   types.Map    `tfsdk:"vars"`
-	Output types.String `tfsdk:"output"`
-	ID     types.String `tfsdk:"id"`
+	Type   types.String  `tfsdk:"type"`
+	Vars   types.Map     `tfsdk:"vars"`
+	Output types.Dynamic `tfsdk:"output"`
+	ID     types.String  `tfsdk:"id"`
 }
 
 func (d *SeristackDataSource) Metadata(ctx context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -80,9 +80,9 @@ func (d *SeristackDataSource) Schema(ctx context.Context, req datasource.SchemaR
 				ElementType:         types.StringType,
 				MarkdownDescription: "Variables to pass to the stack.",
 			},
-			"output": schema.StringAttribute{
+			"output": schema.DynamicAttribute{
 				Computed:            true,
-				MarkdownDescription: "Raw JSON string output from the stack execution.",
+				MarkdownDescription: "Structured output returned by the last stack execution.",
 			},
 		},
 	}
@@ -126,9 +126,14 @@ func (d *SeristackDataSource) Read(ctx context.Context, req datasource.ReadReque
 	if id == "" {
 		id = result.Name
 	}
-	output := extractOutputFromOutput(result.Output)
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	data.ID = types.StringValue(id)
-	data.Output = types.StringValue(output)
+	data.Output = output
 	resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
 }
 

@@ -1,0 +1,341 @@
+stacks:
+- name: oci_bucket_DATASOURCE
+  count: 1
+  method: GET
+  vars:
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+
+    cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    bucket_json="$(${cmd[@]})" || exit 1
+
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson data_result "$bucket_json" \
+      '{id: $id, output: {bucket: $data_result.data}}'
+
+- name: oci_bucket_CREATE
+  count: 1
+  method: POST
+  vars:
+  - name: db_password
+    value: null
+  - name: compartment_id
+    required: true
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
+  - name: storage_tier
+    value: Standard
+  - name: auto_tiering
+    value: null
+  - name: versioning
+    value: Disabled
+  - name: kms_key_id
+    value: null
+  - name: freeform_tags_json
+    value: null
+  - name: defined_tags_json
+    value: null
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket create --region {{.Vars.region}} --compartment-id {{.Vars.compartment_id}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    # cmd=(oci $CONFIG os bucket create --region {{.Vars.region}} --compartment-id {{.Vars.compartment_id}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    [ -n "{{.Vars.storage_tier}}" ] && cmd+=(--storage-tier {{.Vars.storage_tier}})
+    [ -n "{{.Vars.auto_tiering}}" ] && cmd+=(--auto-tiering {{.Vars.auto_tiering}})
+    [ -n "{{.Vars.versioning}}" ] && cmd+=(--versioning {{.Vars.versioning}})
+    [ -n "{{.Vars.kms_key_id}}" ] && cmd+=(--kms-key-id {{.Vars.kms_key_id}})
+    [ -n '{{.Vars.freeform_tags_json}}' ] && cmd+=(--freeform-tags '{{.Vars.freeform_tags_json}}')
+    [ -n '{{.Vars.defined_tags_json}}' ] && cmd+=(--defined-tags '{{.Vars.defined_tags_json}}')
+
+    set +e
+    created_json="$(${cmd[@]} 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      echo "$created_json" >&2
+      exit $rc
+    fi
+  
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson create_result "$created_json" \
+      '{id: $id, output: ($create_result.data | {
+          etag: .etag,
+          "defined-tags": ."defined-tags",
+          "is-bucket-key-enabled": ."is-bucket-key-enabled",
+          "time-created": ."time-created",
+          "bucket-scope": ."bucket-scope",
+          "public-access-type": ."public-access-type",
+          versioning: .versioning,
+          "object-events-enabled": ."object-events-enabled",
+          "replication-enabled": ."replication-enabled"
+      })}'
+- name: oci_bucket_READ
+  method: GET
+  count: 1
+  vars:
+  - name: id
+    required: true
+  - name: compartment_id
+    required: true
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
+  - name: storage_tier
+    value: Standard
+  - name: auto_tiering
+    value: null
+  - name: versioning
+    value: Disabled
+  - name: kms_key_id
+    value: null
+  - name: freeform_tags_json
+    value: null
+  - name: defined_tags_json
+    value: null
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+
+    set +e
+    cmd=(oci os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+
+    #cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    bucket_json="$(${cmd[@]} 2>&1)"
+    rc=$?
+    set -e
+
+    if [ $rc -ne 0 ]; then
+      if echo "$bucket_json" | grep -qi "NotAuthorizedOrNotFound\|404\|Not Found"; then
+        jq -n '{not_found: true}'
+        exit 0
+      fi
+      echo "$bucket_json" >&2
+      exit $rc
+    fi
+
+    vars_json='{}'
+
+    # Compare actual OCI values with the vars currently in Terraform state.
+    # If a managed value drifted, return that actual value under top-level
+    # `vars` so the provider can refresh state and Terraform can plan the
+    # configured value back during UPDATE.
+
+    actual_compartment_id="$(printf '%s' "$bucket_json" | jq -rb '.data."compartment-id" // ""')"
+    if [ -n "{{.Vars.compartment_id}}" ] && [ "$actual_compartment_id" != "{{.Vars.compartment_id}}" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_compartment_id" '. + {compartment_id: $v}')"
+    fi
+
+    actual_auto_tiering="$(printf '%s' "$bucket_json" | jq -rb '.data."auto-tiering" // ""')"
+    if [ -n "{{.Vars.auto_tiering}}" ] && [ "$actual_auto_tiering" != "{{.Vars.auto_tiering}}" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_auto_tiering" '. + {auto_tiering: $v}')"
+    fi
+
+    actual_versioning="$(printf '%s' "$bucket_json" | jq -rb '.data.versioning // ""')"
+    if [ -n "{{.Vars.versioning}}" ] && [ "$actual_versioning" != "{{.Vars.versioning}}" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_versioning" '. + {versioning: $v}')"
+    fi
+
+    actual_freeform_tags_json="$(printf '%s' "$bucket_json" | jq -cSb '.data."freeform-tags" // {}')"
+    desired_freeform_tags_json="$(printf '%s' '{{.Vars.freeform_tags_json}}' | jq -cSb '. // {}' 2>/dev/null || printf '%s' '{{.Vars.freeform_tags_json}}')"
+    if [ -n '{{.Vars.freeform_tags_json}}' ] && [ "$actual_freeform_tags_json" != "$desired_freeform_tags_json" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_freeform_tags_json" '. + {freeform_tags_json: $v}')"
+    fi
+
+    actual_defined_tags_json="$(printf '%s' "$bucket_json" | jq -cSb '.data."defined-tags" // {}')"
+    desired_defined_tags_json="$(printf '%s' '{{.Vars.defined_tags_json}}' | jq -cSb '. // {}' 2>/dev/null || printf '%s' '{{.Vars.defined_tags_json}}')"
+    if [ -n '{{.Vars.defined_tags_json}}' ] && [ "$actual_defined_tags_json" != "$desired_defined_tags_json" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_defined_tags_json" '. + {defined_tags_json: $v}')"
+    fi
+
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson read_result "$bucket_json" \
+      --argjson vars "$vars_json" \
+      '{id: $id, vars: $vars, output: ($read_result.data | {
+          etag: .etag,
+          "defined-tags": ."defined-tags",
+          "is-bucket-key-enabled": ."is-bucket-key-enabled",
+          "time-created": ."time-created",
+          "bucket-scope": ."bucket-scope",
+          "public-access-type": ."public-access-type",
+          versioning: .versioning,
+          "object-events-enabled": ."object-events-enabled",
+          "replication-enabled": ."replication-enabled"
+      })}'
+
+- name: oci_bucket_UPDATE
+  method: PUT
+  count: 1
+  vars:
+  - name: db_password
+    value: null
+  - name: id
+    required: true
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
+  - name: compartment_id
+    required: true
+  - name: auto_tiering
+    value: null
+  - name: versioning
+    value: Disabled
+  - name: freeform_tags_json
+    value: null
+  - name: defined_tags_json
+    value: null
+  - name: storage_tier
+    value: Standard
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket update --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+  
+    # cmd=(oci $CONFIG os bucket update --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    [ -n "{{.Vars.compartment_id}}" ] && cmd+=(--compartment-id {{.Vars.compartment_id}})
+    [ -n "{{.Vars.auto_tiering}}" ] && cmd+=(--auto-tiering {{.Vars.auto_tiering}})
+    [ -n "{{.Vars.versioning}}" ] && [ "{{.Vars.versioning}}" != "Disabled" ] && cmd+=(--versioning {{.Vars.versioning}})
+    [ -n '{{.Vars.freeform_tags_json}}' ] && cmd+=(--freeform-tags '{{.Vars.freeform_tags_json}}')
+    [ -n '{{.Vars.defined_tags_json}}' ] && cmd+=(--defined-tags '{{.Vars.defined_tags_json}}')
+
+    set +e
+    updated_json="$(${cmd[@]} 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      echo "$updated_json" >&2
+      exit $rc
+    fi
+
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson update_result "$updated_json" \
+      '{id: $id, output: ($update_result.data | {
+          etag: .etag,
+          "defined-tags": ."defined-tags",
+          "is-bucket-key-enabled": ."is-bucket-key-enabled",
+          "time-created": ."time-created",
+          "bucket-scope": ."bucket-scope",
+          "public-access-type": ."public-access-type",
+          versioning: .versioning,
+          "object-events-enabled": ."object-events-enabled",
+          "replication-enabled": ."replication-enabled"
+      })}'
+
+- name: oci_bucket_DELETE
+  count: 1
+  method: DELETE
+  vars:
+  - name: id
+    required: true
+  - name: namespace
+    required: true
+  - name: name
+    required: true
+  - name: region
+    required: true
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket delete --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}} --force)
+
+    # cmd=(oci $CONFIG os bucket delete --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}} --force)
+    "${cmd[@]}" || exit 1
+
+    jq -n --arg id "{{.Vars.namespace}}/{{.Vars.name}}" '{id: $id, output: {deleted: true}}'
+
+- name: oci_bucket_RECREATE_ON
+  method: GET
+  count: 1
+  cmds:
+  - |
+    jq -n '["compartment_id", "namespace", "name", "region"]'
+
+- name: oci_bucket_OUTPUT_CHANGES_ON
+  method: GET
+  count: 1
+  cmds:
+  - |
+    jq -n '["etag"]'
+
+
+# oci_vault_secret.yaml
+#
+# Used by the ephemeral resource:  type = "oci_vault_secret"
+# Only an OPEN stack is needed. Nothing is stored in state or plan.
+#
+# Requires: oci CLI, jq (1.6+ for @base64d), and an IAM policy that allows
+#   read secret-bundles in the compartment of the secret.
+#
+# The script prints ONE JSON document. The `output` object becomes
+# ephemeral.seristack_seristack.<name>.output in Terraform.
+
+- name: oci_bucket_OPEN
+  method: POST
+  count: 1
+  vars:
+  - name: secret_id          # OCID of the secret
+    required: true
+  - name: region
+    required: true
+  - name: stage              # CURRENT, PENDING, LATEST, PREVIOUS, DEPRECATED
+    value: CURRENT
+    allowed_value: ["CURRENT"]
+  - name: version_number     # optional; when set it is used instead of stage
+    value: null
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+
+    cmd=(oci $CONFIG secrets secret-bundle get --region {{.Vars.region}} --secret-id {{.Vars.secret_id}})
+
+    if [ -n "{{.Vars.version_number}}" ]; then
+      cmd+=(--version-number {{.Vars.version_number}})
+    else
+      cmd+=(--stage {{.Vars.stage}})
+    fi
+
+    set +e
+    bundle_json="$(${cmd[@]} 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      # On failure this holds only the CLI error text, never the secret.
+      echo "$bundle_json" >&2
+      exit $rc
+    fi
+
+    # Decode inside jq so the plain-text secret never lands in a shell
+    # variable or on a command line (process list). -b avoids \r on Windows.
+    printf '%s' "$bundle_json" | jq -cb \
+      '{output: {
+          value: (.data."secret-bundle-content".content | @base64d),
+          "version-number": .data."version-number",
+          stages: .data.stages,
+          "time-created": .data."time-created"
+      }}'
