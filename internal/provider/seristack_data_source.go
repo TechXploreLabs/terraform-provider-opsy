@@ -1,10 +1,12 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package provider
 
 import (
 	"context"
 	"fmt"
 
-	opsyseristackaction "github.com/TechXploreLabs/seristack/pkg/opsy"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -19,7 +21,7 @@ func NewSeristackDataSource() datasource.DataSource {
 }
 
 type SeristackDataSource struct {
-	scripts map[string]*opsyseristackaction.Config
+	runner StackRunner
 }
 
 type SeristackDataSourceModel struct {
@@ -47,23 +49,23 @@ func (d *SeristackDataSource) Configure(ctx context.Context, req datasource.Conf
 		return
 	}
 
-	if provider.scripts == nil {
+	if provider.runner == nil {
 		resp.Diagnostics.AddError(
 			"Opsy Provider Not Configured",
-			"The seristack data source was initialised before the provider successfully loaded its scripts bundle. Ensure the provider configure step completed without errors.",
+			"The seristack data source requires either a `local` block (with `path` or `folder_path`) "+
+				"or an `http` block (with `url`) in the provider configuration.",
 		)
 		return
 	}
 
-	d.scripts = provider.scripts
-	tflog.Debug(ctx, "SeristackDatasource configured", map[string]any{"types_available": len(provider.scripts)})
+	d.runner = provider.runner
+	tflog.Debug(ctx, "SeristackDatasource configured")
 }
 
 func (d *SeristackDataSource) Schema(ctx context.Context, req datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Reads data via a seristack YAML definition. " +
-			"The YAML is fetched from the zip bundle configured in the provider block, " +
-			"held in memory for the duration of the run, and never written to disk.",
+		MarkdownDescription: "Reads data via the `DATASOURCE` stack of a seristack type. " +
+			"With the provider `http` block the call is `GET <url>/<type>_DATASOURCE`.",
 
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
@@ -72,8 +74,8 @@ func (d *SeristackDataSource) Schema(ctx context.Context, req datasource.SchemaR
 			},
 			"type": schema.StringAttribute{
 				Required: true,
-				MarkdownDescription: "Datasource type name. Maps to `<type>.yaml` inside the zip bundle " +
-					"(e.g. `bucket` → `bucket.yaml`).",
+				MarkdownDescription: "Datasource type name. Maps to `<type>.yaml` (local) or the endpoint " +
+					"prefix (http), for example `oci_bucket`.",
 			},
 			"vars": schema.MapAttribute{
 				Optional:            true,
@@ -94,24 +96,19 @@ func (d *SeristackDataSource) Read(ctx context.Context, req datasource.ReadReque
 		return
 	}
 
-	vars := flattenVars(data.Vars)
-
-	def, err := d.resolveType(data.Type.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Seristack Type Error", err.Error())
+	if d.runner == nil {
+		resp.Diagnostics.AddError("Opsy Provider Not Configured",
+			"The provider needs a `local` or `http` block to run seristack stacks.")
 		return
 	}
 
+	typeName := data.Type.ValueString()
+	vars := flattenVars(data.Vars)
+
 	tflog.Debug(ctx, "Seristack DataSource: running stack",
-		map[string]any{"type": data.Type.ValueString(), "stack": "DATASOURCE"})
+		map[string]any{"type": typeName, "stack": "DATASOURCE"})
 
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "DATASOURCE",
-		Vars:      vars,
-		Format:    "json",
-	})
-
+	result, err := d.runner.Run(ctx, typeName, "DATASOURCE", vars)
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack DataSource Error", err.Error())
 		return
@@ -128,26 +125,11 @@ func (d *SeristackDataSource) Read(ctx context.Context, req datasource.ReadReque
 	}
 	output, diags := extractOutputFromOutput(result.Output)
 	resp.Diagnostics.Append(diags...)
-
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	data.ID = types.StringValue(id)
 	data.Output = output
 	resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
-}
-
-func (r *SeristackDataSource) resolveType(typeName string) (*opsyseristackaction.Config, error) {
-	if r.scripts == nil {
-		return nil, fmt.Errorf("provider scripts not initialised — check provider configuration")
-	}
-	def, ok := r.scripts[typeName]
-	if !ok {
-		keys := make([]string, 0, len(r.scripts))
-		for k := range r.scripts {
-			keys = append(keys, k)
-		}
-		return nil, fmt.Errorf("type %q not found in scripts bundle — available: %v", typeName, keys)
-	}
-	return def, nil
 }

@@ -6,8 +6,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"time"
 
-	opsyseristackaction "github.com/TechXploreLabs/seristack/pkg/opsy"
 	"github.com/hashicorp/terraform-plugin-framework/action"
 	"github.com/hashicorp/terraform-plugin-framework/action/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -23,7 +23,7 @@ func NewSeristackAction() action.Action {
 
 // SeristackAction defines the action implementation.
 type SeristackAction struct {
-	scripts map[string]*opsyseristackaction.Config
+	runner StackRunner
 }
 
 // SeristackActionModel describes the action data model.
@@ -39,19 +39,19 @@ func (e *SeristackAction) Metadata(ctx context.Context, req action.MetadataReque
 
 func (e *SeristackAction) Schema(ctx context.Context, req action.SchemaRequest, resp *action.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		// This description is used by the documentation generator and the language server.
-		MarkdownDescription: "Seristack action for stack execution",
+		MarkdownDescription: "Runs a named seristack stack. With the provider `local` block the stack is " +
+			"looked up in `<type>.yaml`; with the `http` block it is called as `POST <url>/<type>_<stackname>`.",
 
 		Attributes: map[string]schema.Attribute{
 			"type": schema.StringAttribute{
-				MarkdownDescription: "Resource type name. Maps to `<type>.yaml` inside the scripts bundle.",
+				MarkdownDescription: "Resource type name. Maps to `<type>.yaml` (local) or the endpoint prefix (http).",
 				Required:            true,
 			},
 			"stackname": schema.StringAttribute{
-				MarkdownDescription: "Stack name to be executed",
+				MarkdownDescription: "Stack name to be executed. Over http the stack must be registered on the server with `method: POST`.",
 				Required:            true,
 			},
-			"vars": schema.MapAttribute{ // ← Add this
+			"vars": schema.MapAttribute{
 				MarkdownDescription: "Variables to pass to the stack",
 				Optional:            true,
 				ElementType:         types.StringType,
@@ -74,15 +74,16 @@ func (e *SeristackAction) Configure(ctx context.Context, req action.ConfigureReq
 		return
 	}
 
-	if provider.scripts == nil {
+	if provider.runner == nil {
 		resp.Diagnostics.AddError(
 			"Opsy Provider Not Configured",
-			"The seristack action was initialised before the provider successfully loaded its scripts bundle.",
+			"The seristack action requires either a `local` block (with `path` or `folder_path`) "+
+				"or an `http` block (with `url`) in the provider configuration.",
 		)
 		return
 	}
 
-	e.scripts = provider.scripts
+	e.runner = provider.runner
 }
 
 func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, resp *action.InvokeResponse) {
@@ -100,6 +101,12 @@ func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, 
 		return
 	}
 
+	if e.runner == nil {
+		resp.Diagnostics.AddError("Opsy Provider Not Configured",
+			"The provider needs a `local` or `http` block to run seristack stacks.")
+		return
+	}
+
 	vars := make(map[string]string)
 	if !data.Vars.IsNull() && !data.Vars.IsUnknown() {
 		resp.Diagnostics.Append(data.Vars.ElementsAs(ctx, &vars, false)...)
@@ -108,19 +115,8 @@ func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, 
 		}
 	}
 
-	def, ok := e.scripts[data.Type.ValueString()]
-	if !ok {
-		resp.Diagnostics.AddError("Seristack Type Error", fmt.Sprintf("type %q not found in scripts bundle", data.Type.ValueString()))
-		return
-	}
-
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: data.StackName.ValueString(),
-		Vars:      vars,
-		Format:    "json",
-	})
-
+	start := time.Now()
+	result, err := e.runner.Run(ctx, data.Type.ValueString(), data.StackName.ValueString(), vars)
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack Error", err.Error())
 		return
@@ -139,6 +135,6 @@ func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, 
 	})
 
 	resp.SendProgress(action.InvokeProgressEvent{
-		Message: fmt.Sprintf("stack '%s' completed in %s", result.Name, result.Duration),
+		Message: fmt.Sprintf("stack '%s' completed in %s", result.Name, time.Since(start).Round(time.Millisecond)),
 	})
 }

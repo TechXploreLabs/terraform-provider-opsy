@@ -8,21 +8,39 @@ terraform {
 
 
 provider "opsy" {
-  local {
-   # path = "${path.module}/archive.zip"
-   folder_path = "${path.module}/opsyyamls"
+  # local {
+  #    folder_path = "${path.module}/opsyyamls"
+  #   # path = "${path.module}/archive.zip"
+  # }
+
+  http {
+    # url = "http://localhost:8082/oci/"
+    url                 = "https://seristackapi.getsaas.in/oci/"
+    provider_stack_file = "${path.module}/auth.yaml"
+    provider_stack_name = "auth0"
+
+    vars = {
+
+
+      # optional, read by the provider itself:
+      # timeout      = "10m"
+      # ca_cert_file = "/path/to/ca.pem"
+    }
+
+    # Only access_token. Do NOT list expires_in here.
+    output = ["access_token"]
   }
 }
 
 
-ephemeral "opsy_seristack" "db_password" {
-  type = "oci_bucket"
-  vars = {
-    secret_id = "ocid1.vaultsecret.oc1.ap-mumbai-1.amaaaaaafkdjaoyaihidq44poxk56ar4id4utjgnw5lem6kyaz6jms3cylta"
-    region    = "ap-mumbai-1"
-    version_number  = "1"
-  }
-}
+# ephemeral "opsy_seristack" "db_password" {
+#   type = "oci_bucket"
+#   vars = {
+#     secret_id = "ocid1.vaultsecret.oc1.ap-mumbai-1.amaaaaaafkdjaoyaihidq44poxk56ar4id4utjgnw5lem6kyaz6jms3cylta"
+#     region    = "ap-mumbai-1"
+#     version_number  = "1"
+#   }
+# }
 
 
 resource "opsy_seristack" "testing1" {
@@ -35,11 +53,12 @@ resource "opsy_seristack" "testing1" {
         region         = "ap-mumbai-1"
         freeform_tags_json = jsonencode({
           env   = "dev"
+          mode = "http"
         })
     }
-    sensitive = {
-       db_password = ephemeral.opsy_seristack.db_password.output.value
-     }
+    # sensitive = {
+    #    db_password = ephemeral.opsy_seristack.db_password.output.value
+    #  }
 }
 
 output "testing1" {
@@ -50,9 +69,9 @@ output "testing1" {
 # data "opsy_seristack" "testing1" {
 #   type = "oci_bucket"
 #   vars = {
-#     namespace = "yournamespace"
+#     namespace = "bm0fmmqpaonp"
 #     name = "bucket"
-#     region = "eu-frankfurt-1"
+#     region = "ap-mumbai-1"
 #   }
 # }
 

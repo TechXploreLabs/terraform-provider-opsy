@@ -1,0 +1,63 @@
+stacks:
+- name: auth0
+  count: 1
+  vars:
+  - name: AUTH0_DOMAIN
+    required: true
+  - name: CLIENT_ID
+    required: true
+  - name: USERNAME
+    required: true
+  - name: PASSWORD
+    required: true
+  - name: AUDIENCE
+    value: https://seristackapi.getsaas.in
+  - name: CACHE_FILE
+    value: .opsy_token.json
+  cmds:
+  - |
+    CACHE='{{.Vars.CACHE_FILE}}'
+    AUD='{{.Vars.AUDIENCE}}'
+    NOW="$(date +%s | tr -d '\r')"
+
+    # 1. Reuse the cached token if it is for this user and audience and not near expiry
+    if [ -f "$CACHE" ] && [ -z "$OPSY_FORCE_REFRESH" ]; then
+      tok="$(jq -rb '.access_token // empty' "$CACHE" 2>/dev/null | tr -d '\r')"
+      usr="$(jq -rb '.username // empty' "$CACHE" 2>/dev/null | tr -d '\r')"
+      if [ -n "$tok" ] && [ "$usr" = '{{.Vars.USERNAME}}' ]; then
+        p="$(printf '%s' "$tok" | cut -d. -f2 | tr '_-' '/+')"
+        while [ $(( ${#p} % 4 )) -ne 0 ]; do p="${p}="; done
+        exp="$(printf '%s' "$p" | base64 -d 2>/dev/null \
+          | jq -rb --arg a "$AUD" 'if (.aud == $a) or ((.aud|type)=="array" and (.aud|index($a)) != null) then (.exp // 0) else 0 end' 2>/dev/null \
+          | tr -d '\r')"
+        exp="${exp:-0}"
+        left=$(( exp - NOW ))
+        if [ "$left" -gt 60 ]; then
+          jq -nc --arg t "$tok" --argjson e "$left" '{access_token:$t, expires_in:$e}'
+          exit 0
+        fi
+      fi
+    fi
+
+    # 2. Log in
+    resp="$(jq -n \
+      --arg client_id '{{.Vars.CLIENT_ID}}' \
+      --arg username '{{.Vars.USERNAME}}' \
+      --arg password '{{.Vars.PASSWORD}}' \
+      --arg audience "$AUD" \
+      '{grant_type:"http://auth0.com/oauth/grant-type/password-realm",
+        client_id:$client_id, username:$username, password:$password,
+        audience:$audience, realm:"Username-Password-Authentication"}' \
+      | curl -sS --max-time 20 -X POST 'https://{{.Vars.AUTH0_DOMAIN}}/oauth/token' \
+          -H 'Content-Type: application/json' --data @-)" || exit 1
+
+    if ! printf '%s' "$resp" | jq -e '.access_token' >/dev/null 2>&1; then
+      printf '%s' "$resp" | jq -rb '.error_description // .error // "login failed"' >&2
+      exit 1
+    fi
+
+    # 3. Save token + username only (never the password)
+    printf '%s' "$resp" | jq -c --arg u '{{.Vars.USERNAME}}' '{access_token, username:$u}' > "$CACHE.tmp" \
+      && mv -f "$CACHE.tmp" "$CACHE"
+
+    printf '%s' "$resp" | jq -c '{access_token, expires_in}'

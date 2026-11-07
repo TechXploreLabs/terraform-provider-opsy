@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	opsyseristackaction "github.com/TechXploreLabs/seristack/pkg/opsy"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	ephschema "github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -18,7 +17,7 @@ var _ ephemeral.EphemeralResource = &SeristackEphemeral{}
 var _ ephemeral.EphemeralResourceWithConfigure = &SeristackEphemeral{}
 
 type SeristackEphemeral struct {
-	scripts map[string]*opsyseristackaction.Config
+	runner StackRunner
 }
 
 func NewSeristackEphemeral() ephemeral.EphemeralResource {
@@ -38,14 +37,15 @@ func (e *SeristackEphemeral) Metadata(_ context.Context, req ephemeral.MetadataR
 
 func (e *SeristackEphemeral) Schema(_ context.Context, _ ephemeral.SchemaRequest, resp *ephemeral.SchemaResponse) {
 	resp.Schema = ephschema.Schema{
-		MarkdownDescription: "Runs the `OPEN` stack of a seristack YAML definition and returns its output. " +
-			"Nothing is stored in state or plan files. Requires Terraform 1.10 or later.",
+		MarkdownDescription: "Runs the `OPEN` stack of a seristack type and returns its output. " +
+			"Nothing is stored in state or plan files. Requires Terraform 1.10 or later. " +
+			"With the provider `http` block the call is `POST <url>/<type>_OPEN`.",
 
 		Attributes: map[string]ephschema.Attribute{
 			"type": ephschema.StringAttribute{
 				Required: true,
-				MarkdownDescription: "Type name. Maps to `<type>.yaml` in the configured `local` source. " +
-					"The YAML must define an `OPEN` stack.",
+				MarkdownDescription: "Type name. Maps to `<type>.yaml` (local) or the endpoint prefix (http). " +
+					"It must define an `OPEN` stack.",
 			},
 			"vars": ephschema.MapAttribute{
 				Optional:            true,
@@ -81,15 +81,16 @@ func (e *SeristackEphemeral) Configure(ctx context.Context, req ephemeral.Config
 		return
 	}
 
-	if provider.scripts == nil {
+	if provider.runner == nil {
 		resp.Diagnostics.AddError(
 			"Opsy Provider Not Configured",
-			"The seristack ephemeral resource requires a `local` block (with `path` or `folder_path`) in the opsy provider configuration.",
+			"The seristack ephemeral resource requires either a `local` block (with `path` or `folder_path`) "+
+				"or an `http` block (with `url`) in the provider configuration.",
 		)
 		return
 	}
 
-	e.scripts = provider.scripts
+	e.runner = provider.runner
 }
 
 func (e *SeristackEphemeral) Open(ctx context.Context, req ephemeral.OpenRequest, resp *ephemeral.OpenResponse) {
@@ -99,30 +100,19 @@ func (e *SeristackEphemeral) Open(ctx context.Context, req ephemeral.OpenRequest
 		return
 	}
 
-	typeName := config.Type.ValueString()
-
-	def, ok := e.scripts[typeName]
-	if !ok {
-		keys := make([]string, 0, len(e.scripts))
-		for k := range e.scripts {
-			keys = append(keys, k)
-		}
-		resp.Diagnostics.AddError("Seristack Type Error",
-			fmt.Sprintf("type %q not found — available: %v", typeName, keys))
+	if e.runner == nil {
+		resp.Diagnostics.AddError("Opsy Provider Not Configured",
+			"The ephemeral resource did not receive the provider's runner. Check the provider `local` or `http` block.")
 		return
 	}
 
+	typeName := config.Type.ValueString()
 	vars := mergeVars(ctx, config.Vars, config.Sensitive)
 
 	tflog.Debug(ctx, "Seristack Open: running stack",
 		map[string]any{"type": typeName, "stack": "OPEN"})
 
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "OPEN",
-		Vars:      vars,
-		Format:    "json",
-	})
+	result, err := e.runner.Run(ctx, typeName, "OPEN", vars)
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack Open Error", err.Error())
 		return
