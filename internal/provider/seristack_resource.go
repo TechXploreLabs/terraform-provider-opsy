@@ -230,11 +230,13 @@ func (r *SeristackResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 		return
 	}
 
+
 	partial, diags := partiallyUnknownOutput(ctx, state.Output, volatileKeys)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 
 	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("output"), partial)...)
 }
@@ -675,6 +677,9 @@ func mergeVars(_ context.Context, vars types.Map, sensitive types.Map) map[strin
 	}
 	for k, v := range sensitive.Elements() {
 		if sv, ok := v.(types.String); ok {
+			if sv.IsNull() || sv.IsUnknown() {
+				continue
+			}
 			merged[k] = sv.ValueString()
 		}
 	}
@@ -688,6 +693,9 @@ func flattenVars(vars types.Map) map[string]string {
 	}
 	for k, v := range vars.Elements() {
 		if sv, ok := v.(types.String); ok {
+			if sv.IsNull() || sv.IsUnknown() {
+				continue
+			}
 			out[k] = sv.ValueString()
 		}
 	}
