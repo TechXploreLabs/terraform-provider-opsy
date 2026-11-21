@@ -29,10 +29,9 @@ type SeristackAction struct {
 }
 
 type SeristackActionModel struct {
-	Type      types.String `tfsdk:"type"`
-	StackName types.String `tfsdk:"stackname"`
-	Vars      types.Map    `tfsdk:"vars"`
-	Timeout   types.String `tfsdk:"timeout"`
+	Type    types.String `tfsdk:"type"`
+	Vars    types.Map    `tfsdk:"vars"`
+	Timeout types.String `tfsdk:"timeout"`
 }
 
 func (e *SeristackAction) Metadata(ctx context.Context, req action.MetadataRequest, resp *action.MetadataResponse) {
@@ -47,10 +46,6 @@ func (e *SeristackAction) Schema(ctx context.Context, req action.SchemaRequest, 
 		Attributes: map[string]schema.Attribute{
 			"type": schema.StringAttribute{
 				MarkdownDescription: "Resource type name. Maps to `<type>.yaml` (local) or the endpoint prefix (http).",
-				Required:            true,
-			},
-			"stackname": schema.StringAttribute{
-				MarkdownDescription: "Stack name to be executed. Over http the stack must be registered on the server with `method: POST`.",
 				Required:            true,
 			},
 			"vars": schema.MapAttribute{
@@ -137,7 +132,6 @@ func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, 
 	}
 
 	typeName := data.Type.ValueString()
-	stackName := data.StackName.ValueString()
 
 	timeout := defaultActionTimeout
 	if !data.Timeout.IsNull() && !data.Timeout.IsUnknown() && data.Timeout.ValueString() != "" {
@@ -155,16 +149,16 @@ func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, 
 
 	start := time.Now()
 
-	result, err := runOperationProgress(runCtx, e.runner, typeName, stackName, vars,
+	result, err := runOperationProgress(runCtx, e.runner, typeName, "ACTION", vars,
 		func(_ context.Context, id string) error {
 			resp.SendProgress(action.InvokeProgressEvent{
-				Message: fmt.Sprintf("stack '%s' accepted the request (id=%s)", stackName, id),
+				Message: fmt.Sprintf("stack '%s' accepted the request (id=%s)", "ACTION", id),
 			})
 			return nil
 		},
 		func(wait time.Duration) {
 			resp.SendProgress(action.InvokeProgressEvent{
-				Message: fmt.Sprintf("stack '%s' is pending; checking again in %s", stackName, wait.Round(time.Second)),
+				Message: fmt.Sprintf("stack '%s' is pending; checking again in %s", "ACTION", wait.Round(time.Second)),
 			})
 		})
 	if err != nil {

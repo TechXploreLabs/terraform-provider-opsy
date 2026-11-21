@@ -1,8 +1,6 @@
-
-- name: demo_WAIT
+stacks:
+- name: ACTION
   count: 1
-  method: POST
-  urlPath: /oci/demo_WAIT
   vars:
   - name: seristack_status          # reserved: the provider sets "null" / "pending"
     value: "null"

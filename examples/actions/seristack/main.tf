@@ -18,7 +18,6 @@ provider "opsy" {
 action "opsy_seristack" "action1" {
   config {
     type      = "function"
-    stackname = "demo_WAIT"
     vars = {
       duration_seconds = "180"   # how long the demo runs
       retry_seconds    = "30"    # how often the provider checks again

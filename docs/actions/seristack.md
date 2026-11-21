@@ -20,6 +20,26 @@ To know more about seristack, please visit [seristack](https://seristack.getsaas
 
 ## Example Usage
 
+```bash
+mkdir opsyyamls
+cd opsyyamls
+touch function.yaml
+```
+add the below content in the yaml file
+
+```yaml
+stacks:
+- name: ACTION
+  count: 1
+  vars:
+  - name: name
+    value: "null"
+    allowed_value: ["opsy"]
+  cmds:
+  - |
+    echo "{{.Vars.name}}"
+```
+
 ```terraform
 terraform {
   required_providers {

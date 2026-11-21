@@ -20,6 +20,38 @@ To know more about seristack, please visit [seristack](https://seristack.getsaas
 
 ## Example Usage
 
+```bash
+mkdir opsyyamls
+cd opsyyamls
+touch oci_bucket.yaml
+```
+add the below content in the yaml file
+
+```yaml
+stacks:
+- name: DATASOURCE
+  count: 1
+  vars:
+  - name: namespace
+    allowed_value: ["bm0fmmqpaonp"] 
+  - name: name
+    allowed_regex: regex("^[a-zA-Z0-9._-]{1,256}$")
+  - name: region
+    allowed_value: ["ap-mumbai-1"]
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+
+    cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    bucket_json="$("${cmd[@]}")" || exit 1
+
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson data_result "$bucket_json" \
+      '{id: $id, output: {bucket: $data_result.data}}'
+```
+
 ```terraform
 terraform {
   required_providers {
