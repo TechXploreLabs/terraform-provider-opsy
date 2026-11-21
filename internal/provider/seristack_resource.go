@@ -6,9 +6,12 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
-	opsyseristackaction "github.com/TechXploreLabs/seristack/pkg/opsy"
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -23,9 +26,20 @@ var _ resource.Resource = &SeristackResource{}
 var _ resource.ResourceWithConfigure = &SeristackResource{}
 var _ resource.ResourceWithModifyPlan = &SeristackResource{}
 var _ resource.ResourceWithImportState = &SeristackResource{}
+var _ resource.ResourceWithValidateConfig = &SeristackResource{}
+
+const (
+	defaultCreateTimeout = 10 * time.Minute
+	defaultReadTimeout   = 10 * time.Minute
+	defaultUpdateTimeout = 10 * time.Minute
+	defaultDeleteTimeout = 10 * time.Minute
+)
+
+const taintNote = "\n\nThe resource was saved in state and is marked tainted. The next apply will " +
+	"destroy and recreate it, so the DELETE stack must succeed when the resource is already gone."
 
 type SeristackResource struct {
-	scripts map[string]*opsyseristackaction.Config
+	runner StackRunner
 }
 
 func NewSeristackResource() resource.Resource {
@@ -33,11 +47,12 @@ func NewSeristackResource() resource.Resource {
 }
 
 type SeristackResourceModel struct {
-	ID        types.String `tfsdk:"id"`
-	Type      types.String `tfsdk:"type"`
-	Vars      types.Map    `tfsdk:"vars"`
-	Sensitive types.Map    `tfsdk:"sensitive"`
-	Output    types.String `tfsdk:"output"`
+	ID        types.String   `tfsdk:"id"`
+	Type      types.String   `tfsdk:"type"`
+	Vars      types.Map      `tfsdk:"vars"`
+	Sensitive types.Map      `tfsdk:"sensitive"`
+	Output    types.Dynamic  `tfsdk:"output"`
+	Timeouts  timeouts.Value `tfsdk:"timeouts"`
 }
 
 type seristackImportData struct {
@@ -50,11 +65,14 @@ func (r *SeristackResource) Metadata(_ context.Context, req resource.MetadataReq
 	resp.TypeName = req.ProviderTypeName + "_seristack"
 }
 
-func (r *SeristackResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *SeristackResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a resource lifecycle driven by a seristack YAML definition. " +
-			"The YAML is fetched from the zip bundle configured in the provider block, " +
-			"held in memory for the duration of the run, and never written to disk.",
+		MarkdownDescription: "Manages a resource lifecycle driven by seristack stacks. " +
+			"Stacks run either locally (provider `local` block) or on a seristack HTTP server " +
+			"(provider `http` block). A CREATE, UPDATE or DELETE stack may answer " +
+			"`seristack_status = pending`; the provider then calls the same stack again " +
+			"until it reports `succeeded` or `failed` (see `timeouts`). " +
+			"Variable names starting with `seristack_` are reserved.",
 
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
@@ -66,8 +84,9 @@ func (r *SeristackResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			},
 			"type": schema.StringAttribute{
 				Required: true,
-				MarkdownDescription: "Resource type name. Maps to `<type>.yaml` inside the zip bundle " +
-					"(e.g. `bucket` → `bucket.yaml`). Changing the type always forces replacement.",
+				MarkdownDescription: "Resource type name. With the `local` block it maps to `<type>.yaml`; " +
+					"with the `http` block it is the prefix of the stack endpoints (`/<type>_CREATE`, ...). " +
+					"Changing the type always forces replacement.",
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
@@ -75,7 +94,7 @@ func (r *SeristackResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"vars": schema.MapAttribute{
 				Optional:            true,
 				ElementType:         types.StringType,
-				MarkdownDescription: "Variables passed to every stack invocation.",
+				MarkdownDescription: "Variables passed to every stack invocation. Values must be strings; use `jsonencode()` for lists and objects. Names starting with `seristack_` are reserved.",
 			},
 			"sensitive": schema.MapAttribute{
 				Optional:    true,
@@ -86,10 +105,16 @@ func (r *SeristackResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 					"(tokens, passwords, keys). Merged on top of `vars` at execution time. " +
 					"Never stored in state.",
 			},
-			"output": schema.StringAttribute{
+			"output": schema.DynamicAttribute{
 				Computed:            true,
-				MarkdownDescription: "JSON string of the output returned by the last stack execution.",
+				MarkdownDescription: "Structured output returned by the last stack execution.",
 			},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
+				Create: true,
+				Read:   true,
+				Update: true,
+				Delete: true,
+			}),
 		},
 	}
 }
@@ -108,20 +133,47 @@ func (r *SeristackResource) Configure(ctx context.Context, req resource.Configur
 		return
 	}
 
-	if provider.scripts == nil {
+	if provider.runner == nil {
 		resp.Diagnostics.AddError(
 			"Opsy Provider Not Configured",
-			"The seristack resource was initialised before the provider successfully loaded its scripts bundle. Ensure the provider configure step completed without errors.",
+			"The seristack resource requires either a `local` block (with `path` or `folder_path`) "+
+				"or an `http` block (with `url`) in the provider configuration.",
 		)
 		return
 	}
 
-	r.scripts = provider.scripts
-	tflog.Debug(ctx, "SeristackResource configured", map[string]any{"types_available": len(provider.scripts)})
+	r.runner = provider.runner
+	tflog.Debug(ctx, "SeristackResource configured")
+}
+
+func withOpTimeout(
+	ctx context.Context,
+	get func(context.Context, time.Duration) (time.Duration, diag.Diagnostics),
+	def time.Duration,
+	diags *diag.Diagnostics,
+) (context.Context, context.CancelFunc) {
+	d, dd := get(ctx, def)
+	diags.Append(dd...)
+	if diags.HasError() {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, d)
+}
+
+func nullTimeouts() timeouts.Value {
+	return timeouts.Value{Object: types.ObjectNull(map[string]attr.Type{
+		"create": types.StringType,
+		"read":   types.StringType,
+		"update": types.StringType,
+		"delete": types.StringType,
+	})}
 }
 
 func (r *SeristackResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	if r.runner == nil {
 		return
 	}
 
@@ -136,62 +188,113 @@ func (r *SeristackResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 		return
 	}
 
-	def, err := r.resolveType(plan.Type.ValueString())
-	if err != nil {
-		return
-	}
-
+	typeName := plan.Type.ValueString()
 	vars := flattenVars(plan.Vars)
-	result, stackErr := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "RECREATE_ON",
-		Vars:      vars,
-		Format:    "json",
-	})
-	if stackErr != nil {
+
+	recreateKeys, err := runKeyListStack(ctx, r.runner, typeName, "RECREATE_ON", vars)
+	if err != nil {
 		resp.Diagnostics.AddWarning("recreate_on stack execution error",
-			fmt.Sprintf("Failed to execute recreate_on stack for type %q: %v", plan.Type.ValueString(), stackErr))
-		return
-	}
-	if !result.Success {
-		resp.Diagnostics.AddWarning("recreate_on stack execution failed",
-			fmt.Sprintf("Stack %q failed: %s", result.Name, result.Error))
+			fmt.Sprintf("Failed to execute recreate_on stack for type %q: %v", typeName, err))
 		return
 	}
 
-	var recreateKeys []string
-	if err := json.Unmarshal([]byte(result.Output), &recreateKeys); err != nil {
-		resp.Diagnostics.AddWarning("recreate_on output parse error",
-			fmt.Sprintf("Type %q recreate_on stack must return a JSON array of strings, got: %s", plan.Type.ValueString(), result.Output))
+	if len(recreateKeys) > 0 {
+		var stateVars, planVars map[string]string
+		resp.Diagnostics.Append(state.Vars.ElementsAs(ctx, &stateVars, false)...)
+		resp.Diagnostics.Append(plan.Vars.ElementsAs(ctx, &planVars, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		for _, key := range recreateKeys {
+			if stateVars[key] != planVars[key] {
+				tflog.Debug(ctx, "ModifyPlan: recreate_on key changed → RequiresReplace",
+					map[string]any{"type": typeName, "key": key})
+				resp.RequiresReplace = append(resp.RequiresReplace, path.Root("vars"))
+				return
+			}
+		}
+	}
+
+	if !plan.Output.IsUnknown() {
 		return
 	}
 
-	if len(recreateKeys) == 0 {
+	volatileKeys, err := runKeyListStack(ctx, r.runner, typeName, "OUTPUT_CHANGES_ON", vars)
+	if err != nil {
+		tflog.Debug(ctx, "ModifyPlan: OUTPUT_CHANGES_ON not available, output stays fully unknown",
+			map[string]any{"type": typeName, "error": err.Error()})
+		return
+	}
+	if len(volatileKeys) == 0 {
 		return
 	}
 
-	var stateVars, planVars map[string]types.String
-	resp.Diagnostics.Append(state.Vars.ElementsAs(ctx, &stateVars, false)...)
-	resp.Diagnostics.Append(plan.Vars.ElementsAs(ctx, &planVars, false)...)
+
+	partial, diags := partiallyUnknownOutput(ctx, state.Output, volatileKeys)
+	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	for _, key := range recreateKeys {
-		stateValue := stateVars[key]
-		planValue := planVars[key]
-		if stateValue.IsUnknown() || planValue.IsUnknown() {
-			tflog.Debug(ctx, "ModifyPlan: recreate_on key has unknown value, deferring replacement decision",
-				map[string]any{"type": plan.Type.ValueString(), "key": key})
+
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("output"), partial)...)
+}
+
+func runKeyListStack(ctx context.Context, runner StackRunner, typeName, stack string, vars map[string]string) ([]string, error) {
+	result, err := runner.Run(ctx, typeName, stack, vars)
+	if err != nil {
+		return nil, err
+	}
+	if !result.Success {
+		return nil, fmt.Errorf("stack %q failed: %s", result.Name, result.Error)
+	}
+
+	var keys []string
+	if err := json.Unmarshal([]byte(result.Output), &keys); err != nil {
+		return nil, fmt.Errorf("stack %q must return a JSON array of strings, got: %s", stack, result.Output)
+	}
+	return keys, nil
+}
+
+func partiallyUnknownOutput(ctx context.Context, prior types.Dynamic, volatile []string) (types.Dynamic, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if prior.IsNull() || prior.IsUnknown() ||
+		prior.IsUnderlyingValueNull() || prior.IsUnderlyingValueUnknown() {
+		return types.DynamicUnknown(), diags
+	}
+
+	obj, ok := prior.UnderlyingValue().(types.Object)
+	if !ok {
+		return types.DynamicUnknown(), diags
+	}
+
+	priorTypes := obj.AttributeTypes(ctx)
+	priorAttrs := obj.Attributes()
+
+	newTypes := make(map[string]attr.Type, len(priorTypes))
+	newAttrs := make(map[string]attr.Value, len(priorAttrs))
+	for k, t := range priorTypes {
+		newTypes[k] = t
+		newAttrs[k] = priorAttrs[k]
+	}
+
+	for _, k := range volatile {
+		if _, exists := newAttrs[k]; !exists {
 			continue
 		}
-		if !stateValue.Equal(planValue) {
-			tflog.Debug(ctx, "ModifyPlan: recreate_on key changed → RequiresReplace",
-				map[string]any{"type": plan.Type.ValueString(), "key": key})
-			resp.RequiresReplace = append(resp.RequiresReplace, path.Root("vars"))
-			return
-		}
+		newTypes[k] = types.DynamicType
+		newAttrs[k] = types.DynamicUnknown()
 	}
+
+	newObj, d := types.ObjectValue(newTypes, newAttrs)
+	diags.Append(d...)
+	if diags.HasError() {
+		return types.DynamicUnknown(), diags
+	}
+
+	return types.DynamicValue(newObj), diags
 }
 
 func (r *SeristackResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -203,45 +306,81 @@ func (r *SeristackResource) Create(ctx context.Context, req resource.CreateReque
 	if !ok {
 		return
 	}
-
-	def, err := r.resolveType(plan.Type.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Seristack Type Error", err.Error())
+	if !r.requireRunner(&resp.Diagnostics) {
 		return
 	}
 
+	ctx, cancel := withOpTimeout(ctx, plan.Timeouts.Create, defaultCreateTimeout, &resp.Diagnostics)
+	defer cancel()
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	typeName := plan.Type.ValueString()
 	vars := mergeVars(ctx, plan.Vars, config.Sensitive)
 
 	tflog.Debug(ctx, "Seristack Create: running stack",
-		map[string]any{"type": plan.Type.ValueString(), "stack": "CREATE"})
+		map[string]any{"type": typeName, "stack": "CREATE"})
 
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "CREATE",
-		Vars:      vars,
-		Format:    "json",
-	})
+	earlyID := ""
+	result, err := runOperation(ctx, r.runner, typeName, "CREATE", vars,
+		func(ctx context.Context, id string) error {
+
+			early := *plan
+			early.ID = types.StringValue(id)
+			early.Output = types.DynamicNull()
+			early.Sensitive = types.MapNull(types.StringType)
+			d := resp.State.Set(ctx, &early)
+			resp.Diagnostics.Append(d...)
+			if d.HasError() {
+				return errors.New("could not save the early state")
+			}
+			earlyID = id
+			return nil
+		})
 	if err != nil {
-		resp.Diagnostics.AddError("Seristack Create Error", err.Error())
+		detail := err.Error()
+		if earlyID != "" {
+			detail += taintNote
+		}
+		resp.Diagnostics.AddError("Seristack Create Error", detail)
 		return
 	}
 	if !result.Success {
-		resp.Diagnostics.AddError("Seristack Create Execution Failed",
-			fmt.Sprintf("stack: %q\nerror: %s\noutput: %s", result.Name, result.Error, result.Output))
+		detail := fmt.Sprintf("stack: %q\nerror: %s\noutput: %s", result.Name, result.Error, result.Output)
+		if earlyID != "" {
+			detail += taintNote
+		}
+		resp.Diagnostics.AddError("Seristack Create Execution Failed", detail)
 		return
 	}
 
 	id := extractIDFromOutput(result.Output)
 	if id == "" {
+		detail := fmt.Sprintf("Create stack %q must return JSON with an 'id' field. Got: %s", result.Name, result.Output)
+		if earlyID != "" {
+			detail += taintNote
+		}
+		resp.Diagnostics.AddError("Seristack Create Error", detail)
+		return
+	}
+	if earlyID != "" && id != earlyID {
 		resp.Diagnostics.AddError("Seristack Create Error",
-			fmt.Sprintf("Create stack %q must return JSON with an 'id' field. Got: %s", result.Name, result.Output))
+			fmt.Sprintf("The id changed from %q (pending) to %q (succeeded); it must stay the same.", earlyID, id)+taintNote)
 		return
 	}
 
 	tflog.Debug(ctx, "Seristack Create: success", map[string]any{"id": id})
 
 	plan.ID = types.StringValue(id)
-	plan.Output = types.StringValue(extractOutputFromOutput(result.Output))
+
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	plan.Output = output
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -250,26 +389,29 @@ func (r *SeristackResource) Read(ctx context.Context, req resource.ReadRequest, 
 	if !ok {
 		return
 	}
-
-	def, err := r.resolveType(state.Type.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Seristack Type Error", err.Error())
+	if !r.requireRunner(&resp.Diagnostics) {
 		return
 	}
 
+	ctx, cancel := withOpTimeout(ctx, state.Timeouts.Read, defaultReadTimeout, &resp.Diagnostics)
+	defer cancel()
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	typeName := state.Type.ValueString()
+
 	vars := flattenVars(state.Vars)
 	vars["id"] = state.ID.ValueString()
-	vars["_output"] = state.Output.ValueString()
+	if err := r.addOutputVar(vars, state.Output); err != nil {
+		resp.Diagnostics.AddError("Output Serialization Error", err.Error())
+		return
+	}
 
 	tflog.Debug(ctx, "Seristack Read: running stack",
-		map[string]any{"type": state.Type.ValueString(), "stack": "READ", "id": state.ID.ValueString()})
+		map[string]any{"type": typeName, "stack": "READ", "id": state.ID.ValueString()})
 
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "READ",
-		Vars:      vars,
-		Format:    "json",
-	})
+	result, err := r.runner.Run(ctx, typeName, "READ", vars)
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack Read Error", err.Error())
 		return
@@ -287,7 +429,13 @@ func (r *SeristackResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	}
 
-	state.Output = types.StringValue(extractOutputFromOutput(result.Output))
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	state.Output = output
 
 	refreshedVars, foundVars, diags := extractVarsFromOutput(result.Output)
 	resp.Diagnostics.Append(diags...)
@@ -309,7 +457,6 @@ func (r *SeristackResource) Read(ctx context.Context, req resource.ReadRequest, 
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
-
 }
 
 func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -325,12 +472,11 @@ func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateReque
 	if !ok {
 		return
 	}
-
-	def, err := r.resolveType(plan.Type.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Seristack Type Error", err.Error())
+	if !r.requireRunner(&resp.Diagnostics) {
 		return
 	}
+
+	typeName := plan.Type.ValueString()
 
 	if state.Vars.Equal(plan.Vars) {
 		tflog.Info(ctx, "Seristack Update: vars unchanged, skipping execution")
@@ -340,19 +486,23 @@ func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateReque
 		return
 	}
 
+	ctx, cancel := withOpTimeout(ctx, plan.Timeouts.Update, defaultUpdateTimeout, &resp.Diagnostics)
+	defer cancel()
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	vars := mergeVars(ctx, plan.Vars, config.Sensitive)
 	vars["id"] = state.ID.ValueString()
-	vars["_output"] = state.Output.ValueString()
+	if err := r.addOutputVar(vars, state.Output); err != nil {
+		resp.Diagnostics.AddError("Output Serialization Error", err.Error())
+		return
+	}
 
 	tflog.Debug(ctx, "Seristack Update: running stack",
-		map[string]any{"type": plan.Type.ValueString(), "stack": "UPDATE", "id": state.ID.ValueString()})
+		map[string]any{"type": typeName, "stack": "UPDATE", "id": state.ID.ValueString()})
 
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "UPDATE",
-		Vars:      vars,
-		Format:    "json",
-	})
+	result, err := runOperation(ctx, r.runner, typeName, "UPDATE", vars, nil)
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack Update Error", err.Error())
 		return
@@ -364,14 +514,20 @@ func (r *SeristackResource) Update(ctx context.Context, req resource.UpdateReque
 	}
 
 	if newID := extractIDFromOutput(result.Output); newID != "" && newID != state.ID.ValueString() {
-		tflog.Debug(ctx, "Seristack Update: stack returned new id",
-			map[string]any{"old_id": state.ID.ValueString(), "new_id": newID})
-		plan.ID = types.StringValue(newID)
-	} else {
-		plan.ID = state.ID
+		resp.Diagnostics.AddWarning("Seristack Update: id change ignored",
+			fmt.Sprintf("Update stack returned id %q but the resource id is %q. "+
+				"The id cannot change in place; add the var that determines it to the RECREATE_ON stack.",
+				newID, state.ID.ValueString()))
+	}
+	plan.ID = state.ID
+
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
-	plan.Output = types.StringValue(extractOutputFromOutput(result.Output))
+	plan.Output = output
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -380,26 +536,29 @@ func (r *SeristackResource) Delete(ctx context.Context, req resource.DeleteReque
 	if !ok {
 		return
 	}
-
-	def, err := r.resolveType(state.Type.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Seristack Type Error", err.Error())
+	if !r.requireRunner(&resp.Diagnostics) {
 		return
 	}
 
+	ctx, cancel := withOpTimeout(ctx, state.Timeouts.Delete, defaultDeleteTimeout, &resp.Diagnostics)
+	defer cancel()
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	typeName := state.Type.ValueString()
+
 	vars := flattenVars(state.Vars)
 	vars["id"] = state.ID.ValueString()
-	vars["_output"] = state.Output.ValueString()
+	if err := r.addOutputVar(vars, state.Output); err != nil {
+		resp.Diagnostics.AddError("Output Serialization Error", err.Error())
+		return
+	}
 
 	tflog.Debug(ctx, "Seristack Delete: running stack",
-		map[string]any{"type": state.Type.ValueString(), "stack": "DELETE", "id": state.ID.ValueString()})
+		map[string]any{"type": typeName, "stack": "DELETE", "id": state.ID.ValueString()})
 
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "DELETE",
-		Vars:      vars,
-		Format:    "json",
-	})
+	result, err := runOperation(ctx, r.runner, typeName, "DELETE", vars, nil)
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack Delete Error", err.Error())
 		return
@@ -431,10 +590,7 @@ func (r *SeristackResource) ImportState(ctx context.Context, req resource.Import
 	if imp.Vars == nil {
 		imp.Vars = map[string]string{}
 	}
-
-	def, err := r.resolveType(imp.Type)
-	if err != nil {
-		resp.Diagnostics.AddError("Seristack Type Error", err.Error())
+	if !r.requireRunner(&resp.Diagnostics) {
 		return
 	}
 
@@ -444,12 +600,7 @@ func (r *SeristackResource) ImportState(ctx context.Context, req resource.Import
 	}
 	readVars["id"] = imp.ID
 
-	result, err := opsyseristackaction.OpsySeristack(&opsyseristackaction.Config{
-		Config:    def.Config,
-		StackName: "READ",
-		Vars:      readVars,
-		Format:    "json",
-	})
+	result, err := r.runner.Run(ctx, imp.Type, "READ", readVars)
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack Import Read Error", err.Error())
 		return
@@ -466,30 +617,43 @@ func (r *SeristackResource) ImportState(ctx context.Context, req resource.Import
 		return
 	}
 
+	output, diags := extractOutputFromOutput(result.Output)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	data := SeristackResourceModel{
 		ID:        types.StringValue(imp.ID),
 		Type:      types.StringValue(imp.Type),
 		Vars:      varsValue,
 		Sensitive: types.MapNull(types.StringType),
-		Output:    types.StringValue(extractOutputFromOutput(result.Output)),
+		Output:    output,
+		Timeouts:  nullTimeouts(),
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
-func (r *SeristackResource) resolveType(typeName string) (*opsyseristackaction.Config, error) {
-	if r.scripts == nil {
-		return nil, fmt.Errorf("provider scripts not initialised — check provider configuration")
+func (r *SeristackResource) requireRunner(diags *diag.Diagnostics) bool {
+	if r.runner == nil {
+		diags.AddError("Opsy Provider Not Configured",
+			"The provider needs a `local` or `http` block to run seristack stacks.")
+		return false
 	}
-	def, ok := r.scripts[typeName]
-	if !ok {
-		keys := make([]string, 0, len(r.scripts))
-		for k := range r.scripts {
-			keys = append(keys, k)
-		}
-		return nil, fmt.Errorf("type %q not found in scripts bundle — available: %v", typeName, keys)
+	return true
+}
+
+func (r *SeristackResource) addOutputVar(vars map[string]string, out types.Dynamic) error {
+	if _, isHTTP := r.runner.(*httpRunner); isHTTP {
+		return nil
 	}
-	return def, nil
+	outputJSON, err := dynamicValueToJSON(out)
+	if err != nil {
+		return err
+	}
+	vars["_output"] = outputJSON
+	return nil
 }
 
 func extractModel[T any](

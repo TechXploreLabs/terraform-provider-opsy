@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	opsyseristackaction "github.com/TechXploreLabs/seristack/pkg/opsy"
@@ -30,15 +31,23 @@ var _ provider.ProviderWithFunctions = &OpsyProvider{}
 
 type OpsyProvider struct {
 	version string
+
+	// scripts is set only in local mode (kept for code that still reads it).
 	scripts map[string]*opsyseristackaction.Config
+
+	// runner executes stacks: localRunner or httpRunner. nil when the
+	// provider block has neither a local nor an http block (functions only).
+	runner StackRunner
 }
 
 type OpsyProviderModel struct {
-	Local []LocalModel `tfsdk:"local"`
+	Local *LocalModel `tfsdk:"local"`
+	Http  *HttpModel  `tfsdk:"http"`
 }
 
 type LocalModel struct {
-	Path types.String `tfsdk:"path"`
+	Path        types.String `tfsdk:"path"`
+	Folder_path types.String `tfsdk:"folder_path"`
 }
 
 func (p *OpsyProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -48,20 +57,66 @@ func (p *OpsyProvider) Metadata(_ context.Context, _ provider.MetadataRequest, r
 
 func (p *OpsyProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "The **opsy** provider downloads a zip bundle of seristack YAML " +
-			"definitions from a local file, holds them in memory for the duration " +
-			"of the run, and never writes them to disk.",
+		MarkdownDescription: "The **opsy** provider runs seristack stacks, either locally from YAML " +
+			"definitions or on a seristack HTTP server. Set at most one of the `local` and `http` blocks.",
 
 		Blocks: map[string]schema.Block{
 
-			"local": schema.ListNestedBlock{
-				MarkdownDescription: "Local zip file path. Tried first before any remote source. Useful for development or air-gapped environments.",
-				NestedObject: schema.NestedBlockObject{
-					Attributes: map[string]schema.Attribute{
-						"path": schema.StringAttribute{
-							Required:            true,
-							MarkdownDescription: "Absolute or relative path to a `.zip` file containing the seristack YAML definitions.",
-						},
+			"local": schema.SingleNestedBlock{
+				MarkdownDescription: "Run stacks locally from YAML definitions. " +
+					"Set exactly one of `path` or `folder_path`.",
+				Attributes: map[string]schema.Attribute{
+					"path": schema.StringAttribute{
+						Optional: true,
+						MarkdownDescription: "Absolute or relative path to a `.zip` file " +
+							"containing the seristack YAML definitions. Conflicts with `folder_path`.",
+					},
+					"folder_path": schema.StringAttribute{
+						Optional: true,
+						MarkdownDescription: "Absolute or relative path to a directory " +
+							"containing `.yaml` or `.yml` files. Conflicts with `path`.",
+					},
+				},
+			},
+
+			"http": schema.SingleNestedBlock{
+				MarkdownDescription: "Run stacks on a seristack HTTP server. Each stack is called as " +
+					"`<url>/<type>_<STACK>` with the variables sent as query parameters. " +
+					"Authentication is done by a local *provider stack*: a stack in a local YAML file that " +
+					"prints JSON. The keys listed in `output` are sent on every request.",
+				Attributes: map[string]schema.Attribute{
+					"url": schema.StringAttribute{
+						Optional: true,
+						MarkdownDescription: "Base URL of the seristack server, for example " +
+							"`https://seristack.example.com/`. Required when the `http` block is present.",
+					},
+					"provider_stack_file": schema.StringAttribute{
+						Optional: true,
+						MarkdownDescription: "Path to a local YAML file that contains the provider stack. " +
+							"Required together with `provider_stack_name` and `output`.",
+					},
+					"provider_stack_name": schema.StringAttribute{
+						Optional: true,
+						MarkdownDescription: "Name of the stack in `provider_stack_file`. It runs on this machine " +
+							"(not on the server) the first time credentials are needed, and again when they " +
+							"expire or the server answers 401.",
+					},
+					"vars": schema.MapAttribute{
+						Optional:    true,
+						Sensitive:   true,
+						ElementType: types.StringType,
+						MarkdownDescription: "Variables passed to the provider stack (for example `token_url`, " +
+							"`client_id`, `client_secret`, `audience`). Declare each one under `vars:` in the stack. " +
+							"Two keys are also read by the provider itself: `ca_cert_file` (PEM bundle to trust) " +
+							"and `timeout` (per-request Go duration, default `10m`).",
+					},
+					"output": schema.ListAttribute{
+						Optional:    true,
+						ElementType: types.StringType,
+						MarkdownDescription: "Keys of the provider stack's JSON output to send on every request. " +
+							"The key `access_token` is sent as `Authorization: Bearer <value>`; any other key is " +
+							"sent as an HTTP header with that name. An optional `expires_in` key (seconds) in the " +
+							"JSON tells the provider when to run the stack again.",
 					},
 				},
 			},
@@ -69,62 +124,54 @@ func (p *OpsyProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp 
 	}
 }
 
-func (p *OpsyProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
+func (p *OpsyProvider) Configure(
+	ctx context.Context,
+	req provider.ConfigureRequest,
+	resp *provider.ConfigureResponse,
+) {
 	var config OpsyProviderModel
+
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	if len(config.Local) == 0 {
+	if config.Local != nil && config.Http != nil {
 		resp.Diagnostics.AddError(
 			"Invalid Provider Configuration",
-			"One source must be configured: `local`.",
+			"Set either the `local` block or the `http` block, not both.",
 		)
 		return
 	}
 
-	var zipBytes []byte
-	var sourceUsed string
-
-	for _, local := range config.Local {
-		localPath := local.Path.ValueString()
-		data, err := os.ReadFile(localPath)
-		if err != nil {
-			tflog.Warn(ctx, "Skipping local source: file read failed",
-				map[string]any{"path": localPath, "error": err.Error()})
-			continue
+	switch {
+	case config.Http != nil:
+		runner, diags := newHTTPRunnerFromModel(ctx, config.Http)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
 		}
-		zipBytes = data
-		sourceUsed = "local:" + localPath
-		break
+		p.runner = runner
+		tflog.Debug(ctx, "Opsy: using http source")
+
+	case config.Local != nil:
+		scripts, diags := loadLocalScripts(ctx, config.Local)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		p.scripts = scripts
+		p.runner = &localRunner{scripts: scripts}
+
+	default:
+		// No source: only provider-defined functions are usable.
+		tflog.Debug(ctx, "Opsy: no local or http block configured; seristack stacks unavailable")
 	}
 
-	if zipBytes == nil {
-		resp.Diagnostics.AddError(
-			"Opsy Provider Configuration Error",
-			"No scripts bundle could be loaded from configured local source. "+
-				"Check your provider block and ensure the source is reachable.",
-		)
-		return
-	}
-
-	tflog.Debug(ctx, "Opsy: scripts bundle loaded", map[string]any{"source": sourceUsed})
-
-	scripts, err := parseZipBundle(zipBytes)
-	if err != nil {
-		resp.Diagnostics.AddError("Opsy Scripts Parse Error",
-			fmt.Sprintf("Failed to parse scripts bundle from %q: %v", sourceUsed, err))
-		return
-	}
-
-	tflog.Debug(ctx, "Opsy: scripts bundle parsed",
-		map[string]any{"source": sourceUsed, "types_loaded": len(scripts)})
-
-	p.scripts = scripts
 	resp.ResourceData = p
 	resp.DataSourceData = p
 	resp.ActionData = p
+	resp.EphemeralResourceData = p
 }
 
 func (p *OpsyProvider) Resources(_ context.Context) []func() resource.Resource {
@@ -134,7 +181,9 @@ func (p *OpsyProvider) Resources(_ context.Context) []func() resource.Resource {
 }
 
 func (p *OpsyProvider) EphemeralResources(_ context.Context) []func() ephemeral.EphemeralResource {
-	return []func() ephemeral.EphemeralResource{}
+	return []func() ephemeral.EphemeralResource{
+		NewSeristackEphemeral,
+	}
 }
 
 func (p *OpsyProvider) DataSources(_ context.Context) []func() datasource.DataSource {
@@ -163,6 +212,64 @@ func New(version string) func() provider.Provider {
 	}
 }
 
+func loadYAMLDirectory(dir string) (map[string]*opsyseristackaction.Config, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read YAML directory %q: %w", dir, err)
+	}
+
+	scripts := make(map[string]*opsyseristackaction.Config)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+
+		filePath := filepath.Join(dir, name)
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read %s: %w", filePath, err)
+		}
+
+		parsed, err := opsyseristackaction.NewConfigFromYAML(content)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse YAML file %s: %w", filePath, err)
+		}
+
+		typeName := strings.TrimSuffix(name, filepath.Ext(name))
+
+		if _, exists := scripts[typeName]; exists {
+			return nil, fmt.Errorf("duplicate script type %q", typeName)
+		}
+
+		scripts[typeName] = &opsyseristackaction.Config{
+			Config: parsed,
+		}
+	}
+
+	if len(scripts) == 0 {
+		return nil, fmt.Errorf("directory %q contains no valid .yaml or .yml files", dir)
+	}
+
+	return scripts, nil
+}
+
+func loadZipFile(zipPath string) (map[string]*opsyseristackaction.Config, error) {
+	data, err := os.ReadFile(zipPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read zip file %q: %w", zipPath, err)
+	}
+	return parseZipBundle(data)
+}
+
 func parseZipBundle(data []byte) (map[string]*opsyseristackaction.Config, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -176,8 +283,17 @@ func parseZipBundle(data []byte) (map[string]*opsyseristackaction.Config, error)
 			continue
 		}
 
+		if strings.HasPrefix(f.Name, "__MACOSX/") {
+			continue
+		}
+
 		name := normalizeEntryName(f.Name)
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		lower := strings.ToLower(name)
+		if !strings.HasSuffix(lower, ".yaml") && !strings.HasSuffix(lower, ".yml") {
 			continue
 		}
 
@@ -191,7 +307,12 @@ func parseZipBundle(data []byte) (map[string]*opsyseristackaction.Config, error)
 			return nil, fmt.Errorf("failed to build config for %s: %w", f.Name, err)
 		}
 
-		typeName := strings.TrimSuffix(strings.TrimSuffix(name, ".yaml"), ".yml")
+		typeName := strings.TrimSuffix(name, path.Ext(name))
+
+		if _, exists := scripts[typeName]; exists {
+			return nil, fmt.Errorf("duplicate script type %q in bundle", typeName)
+		}
+
 		scripts[typeName] = &opsyseristackaction.Config{
 			Config: parsed,
 		}
