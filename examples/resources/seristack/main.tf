@@ -39,7 +39,7 @@ provider "opsy" {
 
 
 ephemeral "opsy_seristack" "db_password" {
-  type = "oci_vault"
+  type = "oci_vault_secret"
   vars = {
     secret_id = "ocid1.vaultsecret.oc1.ap-mumbai-1.amaaaaaafkdjaoyaihidq44poxk56ar4id4utjgnw5lem6kyaz6jms3cylta"
     region    = "ap-mumbai-1"

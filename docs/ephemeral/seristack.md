@@ -28,6 +28,66 @@ To know more about seristack, please visit [seristack](https://seristack.getsaas
 
 ## Example Usage
 
+```bash
+mkdir opsyyamls
+cd opsyyamls
+touch oci_vault_secret.yaml
+```
+add the below content in the yaml file
+
+```yaml
+stacks:
+- name: OPEN
+  count: 1
+  vars:
+  - name: secret_id          # OCID of the secret
+    allowed_regex: regex("^ocid1[.][a-z0-9_-]+[.][a-z0-9]+[.]([a-z0-9-]*[.])?[a-z0-9]+$")
+  - name: region
+    allowed_value: ["ap-mumbai-1"]
+  - name: stage              # CURRENT, PENDING, LATEST, PREVIOUS, DEPRECATED
+    value: CURRENT
+    allowed_value: ["CURRENT"]
+  - name: version_number     # optional; when set it is used instead of stage
+    value: "null"
+    allowed_regex: regex("^(null|[0-9]{1,6})?$")
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+
+    # An unset var arrives as the text "null": treat it as "not set".
+    nn() { if [ "$1" = "null" ]; then printf ''; else printf '%s' "$1"; fi; }
+    version_number="$(nn "{{.Vars.version_number}}")"
+
+    cmd=(oci $CONFIG secrets secret-bundle get --region {{.Vars.region}} --secret-id {{.Vars.secret_id}})
+
+    if [ -n "$version_number" ]; then
+      cmd+=(--version-number "$version_number")
+    else
+      cmd+=(--stage {{.Vars.stage}})
+    fi
+
+    set +e
+    bundle_json="$("${cmd[@]}" 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      # On failure this holds only the CLI error text, never the secret.
+      echo "$bundle_json" >&2
+      exit $rc
+    fi
+
+    # Decode inside jq so the plain-text secret never lands in a shell
+    # variable or on a command line (process list). -b avoids \r on Windows.
+    printf '%s' "$bundle_json" | jq -cb \
+      '{output: {
+          value: (.data."secret-bundle-content".content | @base64d),
+          "version-number": .data."version-number",
+          stages: .data.stages,
+          "time-created": .data."time-created"
+      }}'
+```
+
 ```terraform
 terraform {
   required_providers {

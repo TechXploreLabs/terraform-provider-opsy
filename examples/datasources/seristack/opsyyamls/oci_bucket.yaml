@@ -1,8 +1,6 @@
 stacks:
-- name: oci_bucket_DATASOURCE
+- name: DATASOURCE
   count: 1
-  method: GET
-  urlPath: /oci/oci_bucket_DATASOURCE
   vars:
   - name: namespace
     allowed_value: ["bm0fmmqpaonp"] 

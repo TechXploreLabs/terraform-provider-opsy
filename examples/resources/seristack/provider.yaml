@@ -528,10 +528,10 @@ stacks:
 # Local mode: use the stack name your per-type YAML expects for stackname = "WAIT".
 
 
-- name: demo_WAIT
+- name: oci_bucket_ACTION
   count: 1
   method: POST
-  urlPath: /oci/demo_WAIT
+  urlPath: /oci/oci_bucket_ACTION
   vars:
   - name: seristack_status          # reserved: the provider sets "null" / "pending"
     value: "null"
