@@ -1,3 +1,4 @@
+
 terraform {
   required_providers {
     opsy = {
@@ -6,19 +7,22 @@ terraform {
   }
 }
 
+
 provider "opsy" {
   local {
-    path = "${path.module}/archive.zip"
+    folder_path = "${path.module}/opsyyamls"
   }
 }
 
 
 action "opsy_seristack" "action1" {
-  config{
+  config {
     type      = "function"
-    stackname = "function_1"
+    stackname = "demo_WAIT"
     vars = {
-      name      = "opsy"
+      duration_seconds = "180"   # how long the demo runs
+      retry_seconds    = "30"    # how often the provider checks again
     }
+    timeout = "10m"              # must be longer than duration_seconds
   }
 }

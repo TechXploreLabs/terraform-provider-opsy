@@ -2,18 +2,15 @@ stacks:
 - name: auth0
   count: 1
   vars:
-  - name: AUTH0_DOMAIN
-    required: true
+  - name: AUTHO_DOMAIN
   - name: CLIENT_ID
-    required: true
   - name: USERNAME
-    required: true
   - name: PASSWORD
-    required: true
+    sensitive: true
   - name: AUDIENCE
-    value: https://seristackapi.getsaas.in
   - name: CACHE_FILE
     value: .opsy_token.json
+    sensitive: true
   cmds:
   - |
     CACHE='{{.Vars.CACHE_FILE}}'
@@ -48,7 +45,7 @@ stacks:
       '{grant_type:"http://auth0.com/oauth/grant-type/password-realm",
         client_id:$client_id, username:$username, password:$password,
         audience:$audience, realm:"Username-Password-Authentication"}' \
-      | curl -sS --max-time 20 -X POST 'https://{{.Vars.AUTH0_DOMAIN}}/oauth/token' \
+      | curl -sS --max-time 20 -X POST 'https://{{.Vars.AUTHO_DOMAIN}}/oauth/token' \
           -H 'Content-Type: application/json' --data @-)" || exit 1
 
     if ! printf '%s' "$resp" | jq -e '.access_token' >/dev/null 2>&1; then

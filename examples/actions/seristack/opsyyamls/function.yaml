@@ -1,7 +1,54 @@
-stacks:
-- name: function_1
+
+- name: demo_WAIT
   count: 1
+  method: POST
+  urlPath: /oci/demo_WAIT
   vars:
-  - name: name
+  - name: seristack_status          # reserved: the provider sets "null" / "pending"
+    value: "null"
+    allowed_value: ["null", "pending"]
+  - name: seristack_status_vars     # reserved: compact JSON from the pending reply
+    value: "null"
+    allowed_regex: regex("^(null|[{]\x22s\x22:[0-9]{1,12},\x22d\x22:[0-9]{1,5}[}])$")
+  - name: duration_seconds          # how long the demo runs (capped at 3600)
+    value: "180"
+    allowed_regex: regex("^[0-9]{1,4}$")
+  - name: retry_seconds             # how often the provider checks again
+    value: "30"
+    allowed_regex: regex("^[0-9]{1,3}$")
   cmds:
-  - echo "hi {{.Vars.name}} from function_1"
+  - |
+    retry="{{.Vars.retry_seconds}}"
+
+    # ---- first call: remember when we started, then ask to be called again ----
+    if [[ "{{.Vars.seristack_status}}" != "pending" ]]; then
+      dur="{{.Vars.duration_seconds}}"
+      if [ "$dur" -gt 3600 ]; then dur=3600; fi
+      now="$(date +%s)"
+      jq -nc --argjson s "$now" --argjson d "$dur" --arg r "${retry}s" \
+        '{seristack_status: "pending", seristack_retry: $r, seristack_status_vars: {s: $s, d: $d}}'
+      exit 0
+    fi
+
+    # ---- status check: read-only, only compares the clock ----------------------
+    SV='{{.Vars.seristack_status_vars}}'
+    s="$(printf '%s' "$SV" | jq -r '.s // empty' 2>/dev/null || true)"
+    d="$(printf '%s' "$SV" | jq -r '.d // empty' 2>/dev/null || true)"
+    if [ -z "$s" ] || [ -z "$d" ]; then
+      echo "seristack_status_vars is missing or invalid" >&2
+      exit 1
+    fi
+
+    now="$(date +%s)"
+    elapsed=$(( now - s ))
+
+    if [ "$elapsed" -ge "$d" ]; then
+      jq -nc --argjson e "$elapsed" --argjson d "$d" \
+        '{seristack_status: "succeeded", output: {waited_seconds: $e, requested_seconds: $d}}'
+    else
+      remaining=$(( d - elapsed ))
+      next=$retry
+      if [ "$remaining" -lt "$next" ]; then next=$remaining; fi
+      jq -nc --argjson s "$s" --argjson d "$d" --arg r "${next}s" \
+        '{seristack_status: "pending", seristack_retry: $r, seristack_status_vars: {s: $s, d: $d}}'
+    fi

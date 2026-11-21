@@ -1,20 +1,22 @@
 stacks:
-- name: DATASOURCE
+- name: oci_bucket_DATASOURCE
   count: 1
+  method: GET
+  urlPath: /oci/oci_bucket_DATASOURCE
   vars:
   - name: namespace
-    required: true
+    allowed_value: ["bm0fmmqpaonp"] 
   - name: name
-    required: true
+    allowed_regex: regex("^[a-zA-Z0-9._-]{1,256}$")
   - name: region
-    required: true
+    allowed_value: ["ap-mumbai-1"]
   cmds:
   - |
     # unset OCI_CLI_AUTH
     # CONFIG="--config-file <update config file path> --profile DEFAULT"
 
     cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
-    bucket_json="$(${cmd[@]})" || exit 1
+    bucket_json="$("${cmd[@]}")" || exit 1
 
     jq -n \
       --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \

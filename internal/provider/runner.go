@@ -4,6 +4,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -87,13 +88,17 @@ func resolveScriptType(scripts map[string]*opsyseristackaction.Config, typeName 
 }
 
 // ---------------------------------------------------------------------------
-// HTTP runner: calls  <METHOD> <url>/<type>_<STACK>?key=value&...
+// HTTP runner: calls  <METHOD> <url>/<type>_<STACK>
+// GET/DELETE: vars in the query string.  POST/PUT: vars in a JSON body.
 // Credentials come from the provider stack (see http_auth.go).
 // ---------------------------------------------------------------------------
 
 const (
 	maxResponseBytes = 16 << 20 // 16 MiB
-	defaultTimeout   = 10 * time.Minute
+
+	// Per request. The overall limit of an operation (all status checks
+	// included) is the resource's `timeouts` setting, not this value.
+	defaultTimeout = 2 * time.Minute
 )
 
 // HttpModel is the provider `http` block.
@@ -167,7 +172,7 @@ func newHTTPRunner(rawURL string, auth *authSource, caFile string, timeout time.
 // passed to the provider stack too):
 //
 //	ca_cert_file  path to a PEM bundle added to the trusted roots
-//	timeout       Go duration for each request, default 10m
+//	timeout       Go duration for each request, default 2m
 func newHTTPRunnerFromModel(ctx context.Context, m *HttpModel) (StackRunner, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
@@ -188,7 +193,7 @@ func newHTTPRunnerFromModel(ctx context.Context, m *HttpModel) (StackRunner, dia
 		parsed, err := time.ParseDuration(s)
 		if err != nil || parsed <= 0 {
 			diags.AddError("Invalid Provider Configuration",
-				fmt.Sprintf("http vars[\"timeout\"] must be a positive duration such as \"10m\", got %q.", s))
+				fmt.Sprintf("http vars[\"timeout\"] must be a positive duration such as \"2m\", got %q.", s))
 			return nil, diags
 		}
 		timeout = parsed
@@ -231,23 +236,38 @@ func (h *httpRunner) Run(ctx context.Context, typeName, stack string, vars map[s
 	name := typeName + "_" + stack
 	endpoint := h.baseURL + "/" + url.PathEscape(name) // safe to show in errors: no query
 
-	q := url.Values{}
-	for k, v := range vars {
-		q.Set(k, v)
-	}
-
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return opsyseristackaction.Result{}, fmt.Errorf("invalid endpoint for stack %q", name)
 	}
-	u.RawQuery = q.Encode()
+
+	// POST and PUT carry the vars in a JSON body, so values (including the
+	// `sensitive` ones) never appear in the URL and so never in access logs of
+	// the proxies in front of the server. GET and DELETE have no body: their
+	// vars go in the query string (they carry no secrets).
+	var body []byte
+	if method == http.MethodPost || method == http.MethodPut {
+		if vars == nil {
+			vars = map[string]string{} // encode as {} (not null)
+		}
+		body, err = json.Marshal(vars) // a flat {"name":"value"} object
+		if err != nil {
+			return opsyseristackaction.Result{}, fmt.Errorf("could not encode variables for stack %q", name)
+		}
+	} else {
+		q := url.Values{}
+		for k, v := range vars {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+	}
 	target := u.String()
 
 	tflog.Debug(ctx, "Seristack HTTP: calling stack",
 		map[string]any{"method": method, "endpoint": endpoint, "var_count": len(vars)})
 
 	for attempt := 0; ; attempt++ {
-		reply, gen, err := h.do(ctx, method, target, endpoint)
+		reply, gen, err := h.do(ctx, method, target, endpoint, body)
 		if err != nil {
 			return opsyseristackaction.Result{}, err
 		}
@@ -272,18 +292,32 @@ func (h *httpRunner) Run(ctx context.Context, typeName, stack string, vars map[s
 				Error: fmt.Sprintf("HTTP %d from %s: the server rejected the credentials. %s",
 					reply.status, endpoint, truncate(strings.TrimSpace(string(reply.body)), 500)),
 			}, nil
+		case reply.status == http.StatusBadGateway ||
+			reply.status == http.StatusServiceUnavailable ||
+			reply.status == http.StatusGatewayTimeout:
+			// Returned as an error (not a failed Result) so that, while an
+			// operation is being polled, a gateway blip counts as transient.
+			return opsyseristackaction.Result{}, fmt.Errorf(
+				"HTTP %d from %s: server temporarily unavailable", reply.status, endpoint)
 		}
 
 		return decodeStackResponse(name, reply.status, reply.body), nil
 	}
 }
 
-func (h *httpRunner) do(ctx context.Context, method, target, endpoint string) (httpReply, uint64, error) {
-	req, err := http.NewRequestWithContext(ctx, method, target, nil)
+func (h *httpRunner) do(ctx context.Context, method, target, endpoint string, body []byte) (httpReply, uint64, error) {
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body) // a fresh reader on every attempt (401 retry)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reqBody)
 	if err != nil {
 		return httpReply{}, 0, fmt.Errorf("could not build %s request for %s", method, endpoint)
 	}
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	var gen uint64
 	if h.auth != nil {
@@ -309,14 +343,14 @@ func (h *httpRunner) do(ctx context.Context, method, target, endpoint string) (h
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return httpReply{}, 0, fmt.Errorf("reading response from %s: %w", endpoint, err)
 	}
 
 	return httpReply{
 		status:   resp.StatusCode,
-		body:     body,
+		body:     respBody,
 		location: resp.Header.Get("Location"),
 	}, gen, nil
 }

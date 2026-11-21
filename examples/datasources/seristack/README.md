@@ -1,13 +1,8 @@
-Step 1: Create the archive.zip file
+# Terraform data 
 
-```bash
-pushd opsyyamls; zip -r archive.zip . ; mv archive.zip ../; popd"
-```
+Step 1: terraform init
 
-Step 2: terraform init
+Step 1: terraform plan
 
-Step 3: terraform plan
+Step 1: terraform apply
 
-Step 4: terraform apply -auto-approve
-
-Step 5: terraform destroy -auto-approve

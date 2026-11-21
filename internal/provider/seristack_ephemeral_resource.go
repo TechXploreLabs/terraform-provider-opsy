@@ -118,7 +118,7 @@ func (e *SeristackEphemeral) Open(ctx context.Context, req ephemeral.OpenRequest
 		return
 	}
 	if !result.Success {
-		// Do not print result.Output here: it may contain secrets.
+
 		resp.Diagnostics.AddError("Seristack Open Execution Failed",
 			fmt.Sprintf("stack: %q\nerror: %s", result.Name, result.Error))
 		return

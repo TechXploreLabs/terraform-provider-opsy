@@ -10,7 +10,7 @@ terraform {
 
 provider "opsy" {
   local {
-    path = "${path.module}/archive.zip"
+    folder_path = "${path.module}/opsyyamls"
   }
 }
 

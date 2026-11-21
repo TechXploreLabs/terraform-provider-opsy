@@ -6,31 +6,33 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/action"
 	"github.com/hashicorp/terraform-plugin-framework/action/schema"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-// Ensure provider defined types fully satisfy framework interfaces.
 var _ action.Action = &SeristackAction{}
 var _ action.ActionWithConfigure = &SeristackAction{}
+
+const defaultActionTimeout = 30 * time.Minute
 
 func NewSeristackAction() action.Action {
 	return &SeristackAction{}
 }
 
-// SeristackAction defines the action implementation.
 type SeristackAction struct {
 	runner StackRunner
 }
 
-// SeristackActionModel describes the action data model.
 type SeristackActionModel struct {
 	Type      types.String `tfsdk:"type"`
 	StackName types.String `tfsdk:"stackname"`
 	Vars      types.Map    `tfsdk:"vars"`
+	Timeout   types.String `tfsdk:"timeout"`
 }
 
 func (e *SeristackAction) Metadata(ctx context.Context, req action.MetadataRequest, resp *action.MetadataResponse) {
@@ -52,9 +54,15 @@ func (e *SeristackAction) Schema(ctx context.Context, req action.SchemaRequest, 
 				Required:            true,
 			},
 			"vars": schema.MapAttribute{
-				MarkdownDescription: "Variables to pass to the stack",
+				MarkdownDescription: "Variables to pass to the stack. Names starting with `seristack_` are reserved.",
 				Optional:            true,
 				ElementType:         types.StringType,
+			},
+			"timeout": schema.StringAttribute{
+				MarkdownDescription: "Go duration limiting the whole run, status checks included, for example `45m`. Default `30m`. " +
+					"If the stack answers `seristack_status = pending`, the provider calls it again after `seristack_retry` " +
+					"until it reports `succeeded` or `failed`.",
+				Optional: true,
 			},
 		},
 	}
@@ -87,14 +95,13 @@ func (e *SeristackAction) Configure(ctx context.Context, req action.ConfigureReq
 }
 
 func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, resp *action.InvokeResponse) {
-	// Send a progress message back to Terraform
+
 	resp.SendProgress(action.InvokeProgressEvent{
 		Message: "starting action invocation",
 	})
 
 	var data SeristackActionModel
 
-	// Read Terraform configuration data into the model
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
 
 	if resp.Diagnostics.HasError() {
@@ -115,8 +122,51 @@ func (e *SeristackAction) Invoke(ctx context.Context, req action.InvokeRequest, 
 		}
 	}
 
+	for k := range vars {
+		if strings.HasPrefix(strings.ToLower(k), reservedVarPrefix) {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("vars").AtMapKey(k),
+				"Reserved variable name",
+				fmt.Sprintf("The variable name %q is reserved: names starting with %q are set by the provider.",
+					k, reservedVarPrefix),
+			)
+		}
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	typeName := data.Type.ValueString()
+	stackName := data.StackName.ValueString()
+
+	timeout := defaultActionTimeout
+	if !data.Timeout.IsNull() && !data.Timeout.IsUnknown() && data.Timeout.ValueString() != "" {
+		d, perr := time.ParseDuration(data.Timeout.ValueString())
+		if perr != nil || d <= 0 {
+			resp.Diagnostics.AddAttributeError(path.Root("timeout"), "Invalid timeout",
+				fmt.Sprintf("`timeout` must be a positive duration such as \"45m\", got %q.", data.Timeout.ValueString()))
+			return
+		}
+		timeout = d
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	start := time.Now()
-	result, err := e.runner.Run(ctx, data.Type.ValueString(), data.StackName.ValueString(), vars)
+
+	result, err := runOperationProgress(runCtx, e.runner, typeName, stackName, vars,
+		func(_ context.Context, id string) error {
+			resp.SendProgress(action.InvokeProgressEvent{
+				Message: fmt.Sprintf("stack '%s' accepted the request (id=%s)", stackName, id),
+			})
+			return nil
+		},
+		func(wait time.Duration) {
+			resp.SendProgress(action.InvokeProgressEvent{
+				Message: fmt.Sprintf("stack '%s' is pending; checking again in %s", stackName, wait.Round(time.Second)),
+			})
+		})
 	if err != nil {
 		resp.Diagnostics.AddError("Seristack Error", err.Error())
 		return
