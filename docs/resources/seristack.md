@@ -27,7 +27,7 @@ To know more about seristack, please visit [seristack](https://seristack.getsaas
 
 ## Example Usage
 
-[example_yaml](https://github.com/TechXploreLabs/terraform-provider-opsy/blob/main/examples/resources/seristack/provider.yaml)
+[example_yaml](https://github.com/TechXploreLabs/terraform-provider-opsy/blob/main/examples/resources/seristack/opsyyamls/)
 
 ```terraform
 terraform {

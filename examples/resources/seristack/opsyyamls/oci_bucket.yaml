@@ -420,35 +420,6 @@ stacks:
     jq -n '["etag"]'
 
 
-# demo_wait.yaml: a stack for the ACTION block that only waits.
-# It creates and changes nothing; it exists to exercise the retry loop.
-#
-# How it works (no state is kept on the server):
-#   call 1  (seristack_status=null)   : records the start time and answers
-#             {"seristack_status":"pending","seristack_retry":"30s",
-#              "seristack_status_vars":{"s":<start epoch>,"d":<duration seconds>}}
-#   call 2+ (seristack_status=pending): the provider sends seristack_status_vars
-#             back; the stack compares the clock with s+d and answers pending
-#             again, or {"seristack_status":"succeeded","output":{...}}.
-#
-# Endpoint: POST /oci/demo_WAIT  (the action calls <provider url>/<type>_<stackname>,
-# so type = "demo" and stackname = "WAIT"). The "/oci/" part follows the base URL
-# of your provider block; change it if your url differs.
-#
-# Terraform:
-#   action "opsy_seristack" "wait" {
-#     config {
-#       type      = "demo"
-#       stackname = "WAIT"
-#       vars      = { duration_seconds = "180", retry_seconds = "30" }
-#       timeout   = "10m"      # must be longer than duration_seconds
-#     }
-#   }
-#   terraform apply -invoke=action.opsy_seristack.wait     (Terraform 1.14+)
-#
-# Local mode: use the stack name your per-type YAML expects for stackname = "WAIT".
-
-
 - name: ACTION
   count: 1
   vars:
