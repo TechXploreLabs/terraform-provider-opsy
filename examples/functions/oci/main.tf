@@ -5,3 +5,12 @@ output "service" {
 output "region" {
   value = provider::opsy::oci("ocid1.instance.oc1.iad.aaaaaaaabyyyyyyyyyyyyyyyyyyyyyyyyyq")
 }
+
+
+terraform {
+  required_providers {
+    opsy = {
+      source = "TechXploreLabs/opsy"
+    }
+  }
+}
