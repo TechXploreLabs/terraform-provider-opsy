@@ -11,7 +11,8 @@ Runs a named stack from a seristack type definition. Stacks run either locally (
 
 The `type` value selects the stack definition:
 
-- **local mode:** it maps to `<type>.yaml` (or `.yml`) inside the configured bundle (archive.zip) or folder, and `stackname` is the name of a stack in that file. For example, `type = "function"` and `stackname = "function_1"` run the stack `function_1` from `function.yaml`.
+- **local mode:** it maps to `<type>.yaml` (or `.yml`) inside the configured bundle (archive.zip) or folder. For example, `type = "function"` so function.yaml should contain one stack called `name: ACTION`.
+
 - **http mode:** the call is `POST <url>/<type>_<stackname>`, with the variables in a JSON body. The stack must be registered on the server with `method: POST`.
 
 Actions are invoked on demand, for example to restart a service, run a backup or flush a cache.
@@ -58,7 +59,6 @@ provider "opsy" {
 action "opsy_seristack" "run_function" {
   config {
     type      = "function"
-    stackname = "function_1"
     vars = {
       name = "opsy"
     }

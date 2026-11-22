@@ -1,0 +1,502 @@
+# Async contract used by the provider for CREATE, UPDATE and DELETE only
+# (DATASOURCE, READ, RECREATE_ON, OUTPUT_CHANGES_ON and OPEN are never polled):
+#
+#   first call      : seristack_status=null
+#   status checks   : seristack_status=pending (+ id, + seristack_status_vars if the
+#                     stack returned any)
+#   stack replies   : {"seristack_status":"pending|succeeded|failed","id":..,
+#                      "output":{..},"seristack_retry":"10s","seristack_status_vars":{..},
+#                      "error":".."}
+#   no seristack_status in the reply = synchronous (what these bucket stacks do).
+#
+# OCI bucket calls complete synchronously, so only CREATE carries a status branch,
+# as the reference pattern (the provider never reaches it for buckets). UPDATE and
+# DELETE just declare the reserved var and refuse a status check, so a mutating
+# command can never run twice by accident.
+#
+# Convention used below: an optional var defaults to the TEXT "null". Scripts that
+# use such a var first run it through nn(), which turns "null" into an empty string,
+# and then test it with [ -n "$var" ]. The regexes of those vars also accept
+# "null", so the default passes validation whether or not seristack validates it.
+
+stacks:
+- name: DATASOURCE
+  count: 1
+  vars:
+  - name: namespace
+    allowed_value: ["bm0fmmqpaonp"] 
+  - name: name
+    allowed_regex: regex("^[a-zA-Z0-9._-]{1,256}$")
+  - name: region
+    allowed_value: ["ap-mumbai-1"]
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+
+    cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    bucket_json="$("${cmd[@]}")" || exit 1
+
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson data_result "$bucket_json" \
+      '{id: $id, output: {bucket: $data_result.data}}'
+
+- name: CREATE
+  count: 1
+  vars:
+  - name: seristack_status        # reserved: the provider sets "null" / "pending"
+    value: "null"
+    allowed_value: ["null", "pending"]
+  - name: id                      # sent by the provider on status checks only
+    value: "null"
+    allowed_regex: regex("^(null|[a-z0-9]{1,64}/[A-Za-z0-9._-]{1,256})$")
+  - name: compartment_id
+    allowed_regex: regex("^ocid1[.][a-z0-9_-]+[.][a-z0-9]+[.]([a-z0-9-]*[.])?[a-z0-9]+$")
+  - name: namespace
+    allowed_value: ["bm0fmmqpaonp"]
+  - name: name
+    allowed_regex: regex("^[a-zA-Z0-9._-]{1,256}$")
+  - name: region
+    allowed_value: ["ap-mumbai-1"]
+  - name: storage_tier
+    value: Standard
+    allowed_value: ["Standard"]
+  - name: auto_tiering
+    value: "null"
+    allowed_value: ["null"]
+  - name: versioning
+    value: Disabled
+    allowed_value: ["Disabled"]
+  - name: kms_key_id
+    value: "null"
+    allowed_regex: regex("^(null|ocid1[.][a-z0-9_-]+[.][a-z0-9]+[.]([a-z0-9-]*[.])?[a-z0-9]+)?$")
+  - name: freeform_tags_json
+    value: "null"
+    allowed_regex: regex("^[{}A-Za-z0-9 _.,:/@=+\x22-]*$")
+  - name: defined_tags_json
+    value: "null"
+    allowed_regex: regex("^[{}A-Za-z0-9 _.,:/@=+\x22-]*$")
+  cmds:
+  # ---- first call: create (synchronous for buckets) ----------------------
+  - |
+    if [[ "{{.Vars.seristack_status}}" == "pending" ]]; then
+      exit 0
+    fi
+
+    # An unset var arrives as the text "null": treat it as "not set".
+    nn() { if [ "$1" = "null" ]; then printf ''; else printf '%s' "$1"; fi; }
+    storage_tier="$(nn "{{.Vars.storage_tier}}")"
+    auto_tiering="$(nn "{{.Vars.auto_tiering}}")"
+    versioning="$(nn "{{.Vars.versioning}}")"
+    kms_key_id="$(nn "{{.Vars.kms_key_id}}")"
+    freeform_tags_json="$(nn '{{.Vars.freeform_tags_json}}')"
+    defined_tags_json="$(nn '{{.Vars.defined_tags_json}}')"
+
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket create --region {{.Vars.region}} --compartment-id {{.Vars.compartment_id}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    # cmd=(oci $CONFIG os bucket create --region {{.Vars.region}} --compartment-id {{.Vars.compartment_id}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    [ -n "$storage_tier" ] && cmd+=(--storage-tier "$storage_tier")
+    [ -n "$auto_tiering" ] && cmd+=(--auto-tiering "$auto_tiering")
+    [ -n "$versioning" ] && cmd+=(--versioning "$versioning")
+    [ -n "$kms_key_id" ] && cmd+=(--kms-key-id "$kms_key_id")
+    [ -n "$freeform_tags_json" ] && cmd+=(--freeform-tags "$freeform_tags_json")
+    [ -n "$defined_tags_json" ] && cmd+=(--defined-tags "$defined_tags_json")
+
+    set +e
+    created_json="$("${cmd[@]}" 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      echo "$created_json" >&2
+      exit $rc
+    fi
+  
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson create_result "$created_json" \
+      '{id: $id, output: ($create_result.data | {
+          etag: .etag,
+          "defined-tags": ."defined-tags",
+          "is-bucket-key-enabled": ."is-bucket-key-enabled",
+          "time-created": ."time-created",
+          "bucket-scope": ."bucket-scope",
+          "public-access-type": ."public-access-type",
+          versioning: .versioning,
+          "object-events-enabled": ."object-events-enabled",
+          "replication-enabled": ."replication-enabled"
+      })}'
+  # ---- status checks: READ-ONLY reference pattern -------------------------
+  # Not reached for buckets (create is synchronous). Delete this command if
+  # you want a pure synchronous stack. For an async resource, the first
+  # command would print {"seristack_status":"pending","id":"<unique id>",
+  # "seristack_retry":"10s"} and this one decides pending / succeeded / failed.
+  - |
+    if [[ "{{.Vars.seristack_status}}" != "pending" ]]; then
+      exit 0
+    fi
+    ID='{{.Vars.id}}'
+    if [ -z "$ID" ] || [ "$ID" = "null" ]; then
+      echo "id is required for a status check" >&2
+      exit 1
+    fi
+    ns="${ID%%/*}"
+    nm="${ID#*/}"
+
+    set +e
+    bucket_json="$(oci os bucket get --region {{.Vars.region}} --namespace "$ns" --name "$nm" 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      if echo "$bucket_json" | grep -qi "NotAuthorizedOrNotFound\|404\|Not Found"; then
+        jq -n --arg id "$ID" '{seristack_status: "failed", error: ("bucket " + $id + " was not found")}'
+        exit 0
+      fi
+      echo "$bucket_json" >&2
+      exit $rc
+    fi
+
+    jq -n \
+      --arg id "$ID" \
+      --argjson r "$bucket_json" \
+      '{seristack_status: "succeeded", id: $id, output: ($r.data | {
+          etag: .etag,
+          "defined-tags": ."defined-tags",
+          "is-bucket-key-enabled": ."is-bucket-key-enabled",
+          "time-created": ."time-created",
+          "bucket-scope": ."bucket-scope",
+          "public-access-type": ."public-access-type",
+          versioning: .versioning,
+          "object-events-enabled": ."object-events-enabled",
+          "replication-enabled": ."replication-enabled"
+      })}'
+
+- name: READ
+  count: 1
+  vars:
+  - name: id
+    allowed_regex: regex("^[a-z0-9]{1,64}/[A-Za-z0-9._-]{1,256}$")
+  - name: compartment_id
+    allowed_regex: regex("^ocid1[.][a-z0-9_-]+[.][a-z0-9]+[.]([a-z0-9-]*[.])?[a-z0-9]+$")
+  - name: namespace
+    allowed_value: ["bm0fmmqpaonp"]
+  - name: name
+    allowed_regex: regex("^[a-zA-Z0-9._-]{1,256}$")
+  - name: region
+    allowed_value: ["ap-mumbai-1"]
+  - name: storage_tier
+    value: Standard
+    allowed_value: ["Standard"]
+  - name: auto_tiering
+    value: "null"
+    allowed_value: ["null"]
+  - name: versioning
+    value: Disabled
+    allowed_value: ["Disabled"]
+  - name: kms_key_id
+    value: "null"
+    allowed_regex: regex("^(null|ocid1[.][a-z0-9_-]+[.][a-z0-9]+[.]([a-z0-9-]*[.])?[a-z0-9]+)?$")
+  - name: freeform_tags_json
+    value: "null"
+    allowed_regex: regex("^[{}A-Za-z0-9 _.,:/@=+\x22-]*$")
+  - name: defined_tags_json
+    value: "null"
+    allowed_regex: regex("^[{}A-Za-z0-9 _.,:/@=+\x22-]*$")
+  cmds:
+  - |
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+
+    # An unset var arrives as the text "null": treat it as "not set".
+    nn() { if [ "$1" = "null" ]; then printf ''; else printf '%s' "$1"; fi; }
+    compartment_id="{{.Vars.compartment_id}}"
+    auto_tiering="$(nn "{{.Vars.auto_tiering}}")"
+    versioning="$(nn "{{.Vars.versioning}}")"
+    freeform_tags_json="$(nn '{{.Vars.freeform_tags_json}}')"
+    defined_tags_json="$(nn '{{.Vars.defined_tags_json}}')"
+
+    set +e
+    cmd=(oci os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+
+    #cmd=(oci $CONFIG os bucket get --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    bucket_json="$("${cmd[@]}" 2>&1)"
+    rc=$?
+    set -e
+
+    if [ $rc -ne 0 ]; then
+      if echo "$bucket_json" | grep -qi "NotAuthorizedOrNotFound\|404\|Not Found"; then
+        jq -n '{not_found: true}'
+        exit 0
+      fi
+      echo "$bucket_json" >&2
+      exit $rc
+    fi
+
+    vars_json='{}'
+
+    # Compare actual OCI values with the vars currently in Terraform state.
+    # If a managed value drifted, return that actual value under top-level
+    # `vars` so the provider can refresh state and Terraform can plan the
+    # configured value back during UPDATE.
+
+    actual_compartment_id="$(printf '%s' "$bucket_json" | jq -rb '.data."compartment-id" // ""')"
+    if [ -n "$compartment_id" ] && [ "$actual_compartment_id" != "$compartment_id" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_compartment_id" '. + {compartment_id: $v}')"
+    fi
+
+    actual_auto_tiering="$(printf '%s' "$bucket_json" | jq -rb '.data."auto-tiering" // ""')"
+    if [ -n "$auto_tiering" ] && [ "$actual_auto_tiering" != "$auto_tiering" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_auto_tiering" '. + {auto_tiering: $v}')"
+    fi
+
+    actual_versioning="$(printf '%s' "$bucket_json" | jq -rb '.data.versioning // ""')"
+    if [ -n "$versioning" ] && [ "$actual_versioning" != "$versioning" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_versioning" '. + {versioning: $v}')"
+    fi
+
+    actual_freeform_tags_json="$(printf '%s' "$bucket_json" | jq -cSb '.data."freeform-tags" // {}')"
+    desired_freeform_tags_json="$(printf '%s' "$freeform_tags_json" | jq -cSb '. // {}' 2>/dev/null || printf '%s' "$freeform_tags_json")"
+    if [ -n "$freeform_tags_json" ] && [ "$actual_freeform_tags_json" != "$desired_freeform_tags_json" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_freeform_tags_json" '. + {freeform_tags_json: $v}')"
+    fi
+
+    actual_defined_tags_json="$(printf '%s' "$bucket_json" | jq -cSb '.data."defined-tags" // {}')"
+    desired_defined_tags_json="$(printf '%s' "$defined_tags_json" | jq -cSb '. // {}' 2>/dev/null || printf '%s' "$defined_tags_json")"
+    if [ -n "$defined_tags_json" ] && [ "$actual_defined_tags_json" != "$desired_defined_tags_json" ]; then
+      vars_json="$(printf '%s' "$vars_json" | jq -c --arg v "$actual_defined_tags_json" '. + {defined_tags_json: $v}')"
+    fi
+
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson read_result "$bucket_json" \
+      --argjson vars "$vars_json" \
+      '{id: $id, vars: $vars, output: ($read_result.data | {
+          etag: .etag,
+          "defined-tags": ."defined-tags",
+          "is-bucket-key-enabled": ."is-bucket-key-enabled",
+          "time-created": ."time-created",
+          "bucket-scope": ."bucket-scope",
+          "public-access-type": ."public-access-type",
+          versioning: .versioning,
+          "object-events-enabled": ."object-events-enabled",
+          "replication-enabled": ."replication-enabled"
+      })}'
+
+- name: UPDATE
+  count: 1
+  vars:
+  - name: seristack_status        # reserved: the provider sets "null" / "pending"
+    value: "null"
+    allowed_value: ["null", "pending"]
+  - name: id
+    allowed_regex: regex("^[a-z0-9]{1,64}/[A-Za-z0-9._-]{1,256}$")
+  - name: namespace
+    allowed_value: ["bm0fmmqpaonp"]
+  - name: name
+    allowed_regex: regex("^[a-zA-Z0-9._-]{1,256}$")
+  - name: region
+    allowed_value: ["ap-mumbai-1"]
+  - name: compartment_id
+    allowed_regex: regex("^ocid1[.][a-z0-9_-]+[.][a-z0-9]+[.]([a-z0-9-]*[.])?[a-z0-9]+$")
+  - name: auto_tiering
+    value: "null"
+    allowed_value: ["null"]
+  - name: versioning
+    value: Disabled
+    allowed_value: ["Disabled"]
+  - name: freeform_tags_json
+    value: "null"
+    allowed_regex: regex("^[{}A-Za-z0-9 _.,:/@=+\x22-]*$")
+  - name: defined_tags_json
+    value: "null"
+    allowed_regex: regex("^[{}A-Za-z0-9 _.,:/@=+\x22-]*$")
+  - name: storage_tier
+    value: Standard
+    allowed_value: ["Standard"]
+  cmds:
+  - |
+    # Synchronous stack: never run the update again as a "status check".
+    if [[ "{{.Vars.seristack_status}}" == "pending" ]]; then
+      echo "oci_bucket_UPDATE is synchronous and has no status check" >&2
+      exit 1
+    fi
+
+    # An unset var arrives as the text "null": treat it as "not set".
+    nn() { if [ "$1" = "null" ]; then printf ''; else printf '%s' "$1"; fi; }
+    compartment_id="{{.Vars.compartment_id}}"
+    auto_tiering="$(nn "{{.Vars.auto_tiering}}")"
+    versioning="$(nn "{{.Vars.versioning}}")"
+    freeform_tags_json="$(nn '{{.Vars.freeform_tags_json}}')"
+    defined_tags_json="$(nn '{{.Vars.defined_tags_json}}')"
+
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket update --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+  
+    # cmd=(oci $CONFIG os bucket update --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}})
+    [ -n "$compartment_id" ] && cmd+=(--compartment-id "$compartment_id")
+    [ -n "$auto_tiering" ] && cmd+=(--auto-tiering "$auto_tiering")
+    [ -n "$versioning" ] && [ "$versioning" != "Disabled" ] && cmd+=(--versioning "$versioning")
+    [ -n "$freeform_tags_json" ] && cmd+=(--freeform-tags "$freeform_tags_json")
+    [ -n "$defined_tags_json" ] && cmd+=(--defined-tags "$defined_tags_json")
+
+    set +e
+    updated_json="$("${cmd[@]}" 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      echo "$updated_json" >&2
+      exit $rc
+    fi
+
+    jq -n \
+      --arg id "{{.Vars.namespace}}/{{.Vars.name}}" \
+      --argjson update_result "$updated_json" \
+      '{id: $id, output: ($update_result.data | {
+          etag: .etag,
+          "defined-tags": ."defined-tags",
+          "is-bucket-key-enabled": ."is-bucket-key-enabled",
+          "time-created": ."time-created",
+          "bucket-scope": ."bucket-scope",
+          "public-access-type": ."public-access-type",
+          versioning: .versioning,
+          "object-events-enabled": ."object-events-enabled",
+          "replication-enabled": ."replication-enabled"
+      })}'
+
+- name: DELETE
+  count: 1
+  vars:
+  - name: seristack_status        # reserved: the provider sets "null" / "pending"
+    value: "null"
+    allowed_value: ["null", "pending"]
+  - name: id
+    allowed_regex: regex("^[a-z0-9]{1,64}/[A-Za-z0-9._-]{1,256}$")
+  - name: namespace
+    allowed_value: ["bm0fmmqpaonp"]
+  - name: name
+    allowed_regex: regex("^[a-zA-Z0-9._-]{1,256}$")
+  - name: region
+    allowed_value: ["ap-mumbai-1"]
+  cmds:
+  - |
+    # Synchronous stack: never run the delete again as a "status check".
+    if [[ "{{.Vars.seristack_status}}" == "pending" ]]; then
+      echo "oci_bucket_DELETE is synchronous and has no status check" >&2
+      exit 1
+    fi
+    # unset OCI_CLI_AUTH
+    # CONFIG="--config-file <update config file path> --profile DEFAULT"
+    cmd=(oci os bucket delete --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}} --force)
+
+    # cmd=(oci $CONFIG os bucket delete --region {{.Vars.region}} --namespace {{.Vars.namespace}} --name {{.Vars.name}} --force)
+    set +e
+    deleted_out="$("${cmd[@]}" 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      # Already gone counts as success, so destroy works after a failed or
+      # interrupted create. Note: OCI also answers NotAuthorizedOrNotFound
+      # for a missing permission, the same trade-off oci_bucket_READ makes.
+      if ! echo "$deleted_out" | grep -qi "NotAuthorizedOrNotFound\|404\|Not Found"; then
+        echo "$deleted_out" >&2
+        exit $rc
+      fi
+    fi
+
+    jq -n --arg id "{{.Vars.namespace}}/{{.Vars.name}}" '{id: $id, output: {deleted: true}}'
+
+- name: RECREATE_ON
+  count: 1
+  cmds:
+  - |
+    jq -n '["compartment_id", "namespace", "name", "region"]'
+
+- name: OUTPUT_CHANGES_ON
+  count: 1
+  cmds:
+  - |
+    jq -n '["etag"]'
+
+
+# demo_wait.yaml: a stack for the ACTION block that only waits.
+# It creates and changes nothing; it exists to exercise the retry loop.
+#
+# How it works (no state is kept on the server):
+#   call 1  (seristack_status=null)   : records the start time and answers
+#             {"seristack_status":"pending","seristack_retry":"30s",
+#              "seristack_status_vars":{"s":<start epoch>,"d":<duration seconds>}}
+#   call 2+ (seristack_status=pending): the provider sends seristack_status_vars
+#             back; the stack compares the clock with s+d and answers pending
+#             again, or {"seristack_status":"succeeded","output":{...}}.
+#
+# Endpoint: POST /oci/demo_WAIT  (the action calls <provider url>/<type>_<stackname>,
+# so type = "demo" and stackname = "WAIT"). The "/oci/" part follows the base URL
+# of your provider block; change it if your url differs.
+#
+# Terraform:
+#   action "opsy_seristack" "wait" {
+#     config {
+#       type      = "demo"
+#       stackname = "WAIT"
+#       vars      = { duration_seconds = "180", retry_seconds = "30" }
+#       timeout   = "10m"      # must be longer than duration_seconds
+#     }
+#   }
+#   terraform apply -invoke=action.opsy_seristack.wait     (Terraform 1.14+)
+#
+# Local mode: use the stack name your per-type YAML expects for stackname = "WAIT".
+
+
+- name: ACTION
+  count: 1
+  vars:
+  - name: seristack_status          # reserved: the provider sets "null" / "pending"
+    value: "null"
+    allowed_value: ["null", "pending"]
+  - name: seristack_status_vars     # reserved: compact JSON from the pending reply
+    value: "null"
+    allowed_regex: regex("^(null|[{]\x22s\x22:[0-9]{1,12},\x22d\x22:[0-9]{1,5}[}])$")
+  - name: duration_seconds          # how long the demo runs (capped at 3600)
+    value: "180"
+    allowed_regex: regex("^[0-9]{1,4}$")
+  - name: retry_seconds             # how often the provider checks again
+    value: "30"
+    allowed_regex: regex("^[0-9]{1,3}$")
+  cmds:
+  - |
+    retry="{{.Vars.retry_seconds}}"
+
+    # ---- first call: remember when we started, then ask to be called again ----
+    if [[ "{{.Vars.seristack_status}}" != "pending" ]]; then
+      dur="{{.Vars.duration_seconds}}"
+      if [ "$dur" -gt 3600 ]; then dur=3600; fi
+      now="$(date +%s)"
+      jq -nc --argjson s "$now" --argjson d "$dur" --arg r "${retry}s" \
+        '{seristack_status: "pending", seristack_retry: $r, seristack_status_vars: {s: $s, d: $d}}'
+      exit 0
+    fi
+
+    # ---- status check: read-only, only compares the clock ----------------------
+    SV='{{.Vars.seristack_status_vars}}'
+    s="$(printf '%s' "$SV" | jq -r '.s // empty' 2>/dev/null || true)"
+    d="$(printf '%s' "$SV" | jq -r '.d // empty' 2>/dev/null || true)"
+    if [ -z "$s" ] || [ -z "$d" ]; then
+      echo "seristack_status_vars is missing or invalid" >&2
+      exit 1
+    fi
+
+    now="$(date +%s)"
+    elapsed=$(( now - s ))
+
+    if [ "$elapsed" -ge "$d" ]; then
+      jq -nc --argjson e "$elapsed" --argjson d "$d" \
+        '{seristack_status: "succeeded", output: {waited_seconds: $e, requested_seconds: $d}}'
+    else
+      remaining=$(( d - elapsed ))
+      next=$retry
+      if [ "$remaining" -lt "$next" ]; then next=$remaining; fi
+      jq -nc --argjson s "$s" --argjson d "$d" --arg r "${next}s" \
+        '{seristack_status: "pending", seristack_retry: $r, seristack_status_vars: {s: $s, d: $d}}'
+    fi
