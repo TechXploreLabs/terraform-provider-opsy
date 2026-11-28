@@ -15,16 +15,16 @@ variable "password" {
 provider "opsy" { 
   http {
     url = "http://localhost:8082/oci/"
-    # url                 = "https://yourapi.com/oci/"
+    # url                 = "https://api.in/oci/"
     # provider_stack_file = "${path.module}/auth.yaml"
     # provider_stack_name = "auth0"
 
     # vars = {
     #   AUTHO_DOMAIN = ""
     #   CLIENT_ID    = ""
-    #   USERNAME     = "john@org.com"
+    #   USERNAME     = "john@gmail.com"
     #   PASSWORD     = var.password
-    #   AUDIENCE     = "https://yourapi.com"
+    #   AUDIENCE     = "https://api.in"
 
     #   # optional, read by the provider itself:
     #   # timeout      = "10m"
@@ -39,7 +39,7 @@ provider "opsy" {
 
 
 ephemeral "opsy_seristack" "db_password" {
-  type = "oci_vault_secret"
+  type = "oci_vault"
   vars = {
     secret_id = "ocid1.vaultsecret.oc1.ap-mumbai-1.amaaaaaafkdjaoyaihidq44poxk56ar4id4utjgnw5lem6kyaz6jms3cylta"
     region    = "ap-mumbai-1"

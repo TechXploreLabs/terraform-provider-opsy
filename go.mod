@@ -3,7 +3,7 @@ module github.com/TechXploreLabs/terraform-provider-opsy
 go 1.26.11
 
 require (
-	github.com/TechXploreLabs/seristack v0.4.11
+	github.com/TechXploreLabs/seristack v0.4.12
 	github.com/hashicorp/go-version v1.9.0
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-framework-timeouts v0.7.0

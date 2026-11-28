@@ -86,7 +86,6 @@ func (a *authSource) refreshLocked(ctx context.Context) error {
 		Config:    a.base.Config,
 		StackName: a.stackName,
 		Vars:      vars,
-		Format:    "json",
 	})
 	if err != nil {
 		return fmt.Errorf("provider stack %q: %w", a.stackName, err)
