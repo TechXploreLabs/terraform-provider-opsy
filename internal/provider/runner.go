@@ -67,7 +67,6 @@ func (l *localRunner) Run(_ context.Context, typeName, stack string, vars map[st
 		Config:    def.Config,
 		StackName: stack,
 		Vars:      vars,
-		Format:    "json",
 	})
 }
 
